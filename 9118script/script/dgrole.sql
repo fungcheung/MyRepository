@@ -1,0 +1,4 @@
+set head OFF
+set feed OFF
+SELECT DATABASE_ROLE FROM V$DATABASE;
+

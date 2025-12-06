@@ -1,0 +1,57 @@
+# My settings
+export TMP=/tmp
+export TMPDIR=$TMP
+
+export ORACLE_HOSTNAME=gdat9118
+export ORACLE_UNQNAME=cdb1
+export ORACLE_BASE=/u01/app/oracle
+export ORACLE_HOME=$ORACLE_BASE/product/12.1.0/dbhome_1
+export ORACLE_SID=cdb1
+
+export DBA=csada1@landsd.gov.hk,fungcheung88db@gmail.com
+
+export PATH=/usr/sbin:$PATH
+export PATH=$ORACLE_HOME/bin:$PATH
+
+export MONITOR_DIR=~/script
+export P1=c##dbamon
+export P2=Xy35#Zo54
+export P3=CDB1
+
+export PDB=gisp
+
+export alertlog=$ORACLE_BASE/diag/rdbms/$ORACLE_SID/$ORACLE_SID/trace/alert_$ORACLE_SID.log
+export lsnrlog=$ORACLE_BASE/diag/tnslsnr/$ORACLE_HOSTNAME/listener/trace/listener.log
+
+export LD_LIBRARY_PATH=$ORACLE_HOME/lib:/lib:/usr/lib
+export CLASSPATH=$ORACLE_HOME/jlib:$ORACLE_HOME/rdbms/jlib
+
+alias ls='ls -ltr'
+alias tnsora='view $ORACLE_HOME/network/admin/tnsnames.ora'
+alias lsnrora='view $ORACLE_HOME/network/admin/listener.ora'
+alias lsnrora='view $ORACLE_HOME/network/admin/listener.ora'
+alias psora='ps -ef |grep oracle'
+alias alert='view $ORACLE_BASE/diag/rdbms/$ORACLE_SID/$ORACLE_SID/trace/alert_$ORACLE_SID.log'
+alias alertlsnr='view $ORACLE_BASE/diag/tnslsnr/$ORACLE_HOSTNAME/listener/trace/listener.log'
+alias talert='tail -f $ORACLE_BASE/diag/rdbms/$ORACLE_SID/$ORACLE_SID/trace/alert_$ORACLE_SID.log'
+alias talertlsnr='tail -f $ORACLE_BASE/diag/tnslsnr/$ORACLE_HOSTNAME/listener/trace/listener.log'
+alias alertdg='view $ORACLE_BASE/diag/rdbms/$ORACLE_SID/$ORACLE_SID/trace/drc$ORACLE_SID.log'
+alias talertdg='tail -f $ORACLE_BASE/diag/rdbms/$ORACLE_SID/$ORACLE_SID/trace/drc$ORACLE_SID.log'
+alias sid='env|grep ORACLE_SID'
+alias ol='sqlplus / as sysdba'
+export ob=$ORACLE_BASE
+export oh=$ORACLE_HOME
+export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
+alias sqlplus="rlwrap sqlplus"
+alias dgmgrl="rlwrap dgmgrl"
+alias rman="rlwrap rman"
+alias dgl="dgmgrl sys/oracle"
+alias rmancat="rman target / catalog rmancat/rmancat@orcl"
+alias dufra="du -m /u02/app/oracle/fast_recovery_area/CDB1/ | sort -n"
+alias cdfra="cd /u02/app/oracle/fast_recovery_area/CDB1"
+alias dudat="du -m /u03/app/oracle/oradata/cdb1/ | sort -n"
+alias cddat="cd /u03/app/oracle/oradata/cdb1"
+alias cds="cd ~/script"
+alias cdl="cd ~/script/log"
+
+

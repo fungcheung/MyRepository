@@ -1,0 +1,42 @@
+CONNECT TARGET "sys/Gisp201606@target AS SYSDBA";
+CONNECT CATALOG "rmancat/rmancat@rmancat";
+
+set echo on
+show RETENTION POLICY;
+show ARCHIVELOG DELETION POLICY;
+
+resync catalog from db_unique_name cdb1;
+resync catalog from db_unique_name cdb2;
+
+list backup;
+report obsolete;
+LIST EXPIRED backup;
+LIST EXPIRED archivelog all;
+
+sql "alter session set nls_date_format=''dd.mm.yyyy hh24:mi:ss''";
+sql "alter session set NLS_TIMESTAMP_FORMAT = ''YYYY-MM-DD HH:MI:SS.FF''";
+run {
+allocate channel t1 device type disk;
+set limit channel t1 kbytes 1800000; 
+backup incremental level 0 as compressed backupset database tag=weekly_full plus archivelog;
+release channel t1;
+}
+
+delete noprompt force expired backup;
+delete noprompt force expired archivelog all;
+delete noprompt force obsolete;
+
+crosscheck archivelog all;
+crosscheck backup;
+
+list backup;
+report obsolete;
+LIST EXPIRED backup;
+LIST EXPIRED archivelog all;
+
+restore database validate;
+validate archivelog all;
+restore controlfile validate;
+
+backup validate check logical database archivelog all;
+
