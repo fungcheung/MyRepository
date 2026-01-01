@@ -1,0 +1,1411 @@
+TOC
+Introduction
+Test cases
+Environment
+Production consideration
+Prerequisites
+Change SCAN IP configuration
+Configure multipath.conf in DR
+Setup password-less SSH
+Create a RAC Standby Database
+Site failover test, Switch back test
+Issue during installation
+Useful commands
+FAQ
+  Check cluster status
+  Start/Stop cluster
+  Enable/disable cluster on bootup
+  Check cluster log
+  Start/stop ASM
+appendix
+  dupstby.rcv 
+  /tmp/cdb2.ora , PFILE for standby database
+  .bash_profile (for oracle)
+  .bash_profile (for grid)
+  .bash_profile (for root)
+
+
+#############################################################################################################
+# Introduction
+#############################################################################################################
+#
+# Task: rgih RAC and DG PoC on Nimble storages
+# Date: Mar 2017
+# The file is located in d:\land_datal\rac_dg_poc_rgih_nimble.txt
+# Parties: ASL DBA, Leo Leung, leoleung@asl.com.hk
+
+#############################################################################################################
+# Test cases
+#############################################################################################################
+
+a. Setup Primary site, oracle RAC with sample spatial data
+b. Setup Standby site, non-RAC physical standby
+c. Setup DG broker
+d. GDCS data update, 100Mbps wan
+e. Site failover test, Switch back test
+g. Test oracle grid infrastruction and RAC DB patching, test data guard patching
+
+
+#############################################################################################################
+# Environment
+#############################################################################################################
+node1 Oracle Linux 7.1 192.168.31.234
+node2 Oracle Linux 7.1 192.168.31.223
+dr Oracle Linux 7.1 192.168.31.253
+
+root/password
+oracle/password
+grid/password
+
+dns server: 192.168.31.215
+
+Oracle 12c(12.1.0.2) RAC x86_64
+Grid Infrastruction 12.1.0.2
+
+nslookup scan.devrgih.com
+
+Nible storage provides shared disk for oracle RAC
+
+
+#############################################################################################################
+# Production consideration
+#############################################################################################################
+From oracle software investment guide, for rac on standard edition 2, a max of 2 one-socket servers is 
+only allowed. Each node can only use a max of 8 CPU threads per instance at any time.
+
+1. RAC is very often deployed in physical machines, rather then VM because VM is not officially supported by Oracle
+2. The device mapper for OCRVOTE should be at least 6GB for external redundancy.
+
+
+Notes
+Beware: CPU Threads are not the same as CPU Cores 
+http://databaseperformance.blogspot.hk/2011/07/beware-cpu-threads-are-not-same-as-cpu.html
+
+Hyper-Threading On or Off for Oracle?
+http://itpeernetwork.intel.com/hyper-threading-on-or-off-for-oracle/
+
+
+#############################################################################################################
+# Prerequisites
+#############################################################################################################
+-- Network Tests
+
+-- The public IPs
+ping node1
+ping node2
+
+-- The SCAN 
+nslookup scan
+host oracle-scan
+nslookup 192.168.31.141
+nslookup 192.168.31.142
+nslookup 192.168.31.143
+host 192.168.31.141
+host 192.168.31.142
+host 192.168.31.143
+ping 192.168.31.141 (should not work, destination host unreachable)
+ping 192.168.31.142 (should not work, destination host unreachable)
+ping 192.168.31.143 (should not work, destination host unreachable)
+
+
+-- The VIPs
+nslookup node1-vip
+host node1-vip
+nslookup node2-vip
+host node2-vip
+nslookup 192.168.31.218
+host 192.168.31.218
+nslookup 192.168.31.219
+host 192.168.31.219
+ping node1-vip (should not work, destination host unreachable)
+ping node2-vip (should not work, destination host unreachable)
+
+-- The priviate IPs
+ping 30.30.30.1
+ping 30.30.30.2
+
+-- IPs
+# Public
+192.168.31.234   node1.devrgih.com        node1
+192.168.31.223   node2.devrgih.com        node2
+# Private
+30.30.30.1   node1-priv.devrgih.com   node1-priv
+30.30.30.2   node2-priv.devrgih.com   node2-priv
+# Virtual
+192.168.31.218   node1-vip.devrgih.com    node1-vip
+192.168.31.219   node2-vip.devrgih.com    node2-vip
+# SCAN
+192.168.31.141   scan.devrgih.com scan
+192.168.31.142   scan.devrgih.com scan
+192.168.31.143   scan.devrgih.com scan
+
+
+-- Install required packages
+yum list `awk '{print $1}' ./req-rpm.txt`
+
+yum install `awk '{print $1}' ./req-rpm.txt` -y
+
+yum install `awk '{print $1}' ./missing.txt` -y
+
+Installed:
+  gcc.x86_64 0:4.8.5-4.el7                       gcc-c++.x86_64 0:4.8.5-4.el7
+  glibc-devel.x86_64 0:2.17-106.0.1.el7_2.8      libstdc++-devel.x86_64 0:4.8.5-4.el7
+
+Dependency Installed:
+  cpp.x86_64 0:4.8.5-4.el7                     glibc-headers.x86_64 0:2.17-106.0.1.el7_2.8
+  kernel-headers.x86_64 0:3.10.0-327.28.2.el7  libmpc.x86_64 0:1.0.1-3.el7
+
+Dependency Updated:
+  glibc.x86_64 0:2.17-106.0.1.el7_2.8      glibc-common.x86_64 0:2.17-106.0.1.el7_2.8
+  libgcc.x86_64 0:4.8.5-4.el7              libgomp.x86_64 0:4.8.5-4.el7
+  libstdc++.x86_64 0:4.8.5-4.el7
+
+Complete!
+
+
+-- Disable secure linux
+cp -p /etc/selinux/config /etc/selinux/config.ori
+vi /etc/selinux/config
+--------------------------------
+SELINUX=permissive
+--------------------------------
+
+#setenforce Permissive
+
+-- Set kernel parameters
+cp -p /etc/sysctl.conf /etc/sysctl.conf.ori
+vi /etc/sysctl.conf
+--------------------------------
+vm.swappiness = 1
+vm.dirty_background_ratio = 3
+vm.dirty_ratio = 80
+vm.dirty_expire_centisecs = 500
+vm.dirty_writeback_centisecs = 100
+kernel.shmmax = 4398046511104
+kernel.shmall = 1073741824
+kernel.shmmni = 4096
+kernel.sem = 250 32000 100 128
+fs.file-max = 6815744
+fs.aio-max-nr = 3145728
+net.ipv4.ip_local_port_range = 9000 65500
+net.core.rmem_default = 262144
+net.core.rmem_max = 16780000
+net.core.wmem_default = 262144
+net.core.wmem_max = 16780000
+kernel.panic_on_oops = 1
+net.ipv4.tcp_rmem = 10240 87380 16780000
+net.ipv4.tcp_wmem = 10240 87380 16780000
+kernel.msgmni = 2878
+net.ipv4.conf.ens224.rp_filter = 2
+--------------------------------
+
+sysctl -p
+
+-- Include the conf file as follows
+vi /etc/sysctl.d/98-oracle.conf
+--------------------------------
+vm.swappiness = 1
+vm.dirty_background_ratio = 3
+vm.dirty_ratio = 80
+vm.dirty_expire_centisecs = 500
+vm.dirty_writeback_centisecs = 100
+kernel.shmmax = 4398046511104
+kernel.shmall = 1073741824
+kernel.shmmni = 4096
+kernel.sem = 250 32000 100 128
+fs.file-max = 6815744
+fs.aio-max-nr = 3145728
+net.ipv4.ip_local_port_range = 9000 65500
+net.core.rmem_default = 262144
+net.core.rmem_max = 16780000
+net.core.wmem_default = 262144
+net.core.wmem_max = 16780000
+kernel.panic_on_oops = 1
+net.ipv4.tcp_rmem = 10240 87380 16780000
+net.ipv4.tcp_wmem = 10240 87380 16780000
+kernel.msgmni = 2878
+net.ipv4.conf.ens224.rp_filter = 2
+--------------------------------
+
+sysctl -p /etc/sysctl.d/98-oracle.conf
+
+-- Add users and groups
+groupadd --gid 54321 oinstall
+groupadd --gid 54322 dba
+groupadd --gid 54323 asmdba
+groupadd --gid 54324 asmoper
+groupadd --gid 54325 asmadmin
+groupadd --gid 54326 oper
+groupadd --gid 54327 backupdba
+groupadd --gid 54328 dgdba
+groupadd --gid 54329 kmdba
+useradd --uid 54321 --gid oinstall --groups dba,oper,asmdba,asmoper,backupdba,dgdba,kmdba oracle
+passwd oracle
+useradd --uid 54322 --gid oinstall --groups dba,asmadmin,asmdba,asmoper grid
+passwd grid
+
+-- both password is password
+
+id oracle
+id grid
+
+
+vi /etc/security/limits.d/99-grid-oracle-limits.conf
+--------------------------------------
+oracle soft nproc 131072 #Ora bug 15971421
+oracle hard nproc 131072
+oracle soft nofile 131072
+oracle hard nofile 131072
+oracle soft stack 10240
+oracle hard stack 32768
+oracle soft core unlimited
+oracle hard core unlimited
+oracle soft memlock 50000000
+oracle hard memlock 50000000
+grid soft nproc 131072 #Ora bug 15971421
+grid hard nproc 131072
+grid soft nofile 131072
+grid hard nofile 131072
+grid soft stack 10240
+grid hard stack 32768
+
+--------------------------------------
+
+vi /etc/profile.d/oracle-grid.sh
+--------------------------------------
+#Setting the appropriate ulimits for oracle and grid user
+if [ $USER = "oracle" ]; then
+if [ $SHELL = "/bin/ksh" ]; then
+ulimit -u 131072
+ulimit -n 131072
+else
+ulimit -u 131072 -n 131072
+fi
+fi
+if [ $USER = "grid" ]; then
+if [ $SHELL = "/bin/ksh" ]; then
+ulimit -u 131072
+ulimit -n 131072
+else
+ulimit -u 131072 -n 131072
+fi
+fi
+
+
+--------------------------------------
+
+-- Log in as oracle to check ulimit
+# ulimit -a
+
+-- setup udev as root in node1 and node2
+[root@node1 ~]# for i in mpatha mpathb mpathc mpathd mpathe ; do printf "%s %s\n" "$i" "$(udevadm info --query=all --name=/dev/mapper/$i | grep -i dm_uuid)"; done
+
+
+vi /etc/udev/rules.d/99-oracle-asmdevices.rules
+-----------------------------------------------------------------------------------------------------------------
+KERNEL=="dm-*",ENV{DM_UUID}=="mpath-2301c63fa8ba4b9b26c9ce900cdea1a3f",OWNER="grid",GROUP="asmadmin",MODE="0660"
+KERNEL=="dm-*",ENV{DM_UUID}=="mpath-25fdea44552d8509d6c9ce900cdea1a3f",OWNER="grid",GROUP="asmadmin",MODE="0660"
+KERNEL=="dm-*",ENV{DM_UUID}=="mpath-28e45a57ea7ccf3326c9ce900cdea1a3f",OWNER="grid",GROUP="asmadmin",MODE="0660"
+KERNEL=="dm-*",ENV{DM_UUID}=="mpath-2bde56d5ec1ef32286c9ce900cdea1a3f",OWNER="grid",GROUP="asmadmin",MODE="0660"
+KERNEL=="dm-*",ENV{DM_UUID}=="mpath-2ec4c6e9716e4d5bd6c9ce900cdea1a3f",OWNER="grid",GROUP="asmadmin",MODE="0660"
+---------------------------------------------------------------------------------------------------------------
+
+-- Show device mapper info
+for i in mpatha mpathb mpathc mpathd mpathe; do printf "%s %s\n" "$i" "$(ls -ll /dev/mapper/$i)"; done
+
+-- Apply and test rules ok for all device mapper. 
+udevadm test /sys/block/dm-3
+udevadm test /sys/block/dm-4
+udevadm test /sys/block/dm-5
+udevadm test /sys/block/dm-6
+udevadm test /sys/block/dm-7
+
+
+-- confirm permission set to grid for all device mapper
+ls -lh /dev/dm-3
+ls -lh /dev/dm-4
+ls -lh /dev/dm-5
+ls -lh /dev/dm-6
+ls -lh /dev/dm-7
+
+
+-- Create grid directory
+mkdir --parents /u01/app/grid
+chown --recursive grid.oinstall /u01/
+
+-- Make sure xming is started
+
+-- SSH to grid from root session
+ssh -Y grid@node1
+
+-- Run grid installer. Refer the folder D:\lands_datal\rac_dg_poc_nimble\GridSetup for the screenshots.
+/source/oracle/12cR1/grid/runInstaller
+
+-- At this stage, the grid should be installed. Check the grid is working
+# $GRID_HOME/bin/crsctl check crs
+CRS-4638: Oracle High Availability Services is online
+CRS-4537: Cluster Ready Services is online
+CRS-4529: Cluster Synchronization Services is online
+CRS-4533: Event Manager is online
+
+
+-- Run oralce runInstaller to install the software only. Refer the folder D:\lands_datal\rac_dg_poc_nimble\SetupRAC for the screenshots.
+/source/oracle/12cR1/database/runInstaller
+
+-- Now, we create the ASM disk group for the DATA, FRA 
+-- Login as grid user to run the asmca to create DATA, FRA diskgroups
+ssh -Y grid@node1
+/u01/app/12.1.0/grid/bin/asmca
+
+-- Now, we create the RAC database
+-- Login as oracle user to run dbca
+ssh -Y oracle@node1
+/u01/app/oracle/product/12.1.0/dbhome_1/bin/dbca &
+
+
+#############################################################################################################
+# Change SCAN IP configuration
+#############################################################################################################
+Suppose existing SCAN is scan, and you want to change to scan2
+
+1. Create scan2 in DNS server first with your new IPs
+2. nslookup scan
+3. display current config, login as grid/oracle
+$ export GRID_HOME=/u01/app/12.1.0.2/grid
+$ $GRID_HOME/bin/srvctl config scan 
+4. turn off scan and scan listeners
+$ export GRID_HOME=/u01/app/12.1.0/grid
+$ $GRID_HOME/bin/srvctl stop scan_listener 
+$ $GRID_HOME/bin/srvctl stop scan
+5. modify scan as root user
+$ export GRID_HOME=/u01/app/12.1.0/grid
+$ $GRID_HOME/bin/srvctl modify scan -n scan   
+$ $GRID_HOME/bin/crsctl modify type ora.scan_vip.type -attr "ATTRIBUTE=SCAN_NAME,DEFAULT_VALUE=scan"
+6. turn on as grid/oracle
+$ $GRID_HOME/bin/srvctl modify scan_listener -u 
+$ $GRID_HOME/bin/srvctl start scan
+$ $GRID_HOME/bin/srvctl start scan_listener
+7. display current config, login as grid/oracle
+$ export GRID_HOME=/u01/app/12.1.0.2/grid
+$ $GRID_HOME/bin/srvctl config scan 
+
+
+Reference
+https://oracle-base.com/articles/rac/modifying-scan-configuration-rac-11gr2
+
+
+#############################################################################################################
+# Configure multipath.conf in DR
+#############################################################################################################
+DR uses asmlib to present the shared disks
+
+Refer to belows links on how to configure the asmlib, to make the shared disks available for asmca to create the DG
+https://oracle-base.com/articles/10g/asm-using-asmlib-and-raw-devices
+http://www.oracle.com/webfolder/technetwork/tutorials/obe/db/11g/r2/prod/install/gridinstss/gridinstss.htm
+
+
+[root@dr dev]# oracleasm scandisks
+Reloading disk partitions: done
+Cleaning any stale ASM disks...
+Scanning system for ASM disks...
+[root@dr dev]# oracleasm listdisks
+ASMDISK01
+ASMDISK02
+ASMDISK03
+[root@dr dev]# cd /dev/oracleasm/
+[root@dr oracleasm]# ls
+disks  iid
+[root@dr oracleasm]# cd disks
+[root@dr disks]# ls
+ASMDISK01  ASMDISK02  ASMDISK03
+[root@dr disks]# vi /etc/iscsi/iscsid.conf
+[root@dr disks]# cd /etc
+[root@dr etc]# vi multipath.conf
+multipath.conf      multipath.conf.new  multipath.conf.ori
+[root@dr etc]# vi multipath.conf.new
+[root@dr etc]# vi multipath.conf
+[root@dr etc]# vi multipath.conf
+
+[root@dr etc]# systemctl restart multipathd
+[root@dr etc]# systemctl status multipathd
+¡´ multipathd.service - Device-Mapper Multipath Device Controller
+   Loaded: loaded (/usr/lib/systemd/system/multipathd.service; enabled; vendor preset: enabled)
+   Active: active (running) since Fri 2017-03-17 14:00:04 HKT; 9s ago
+  Process: 11239 ExecStart=/sbin/multipathd (code=exited, status=0/SUCCESS)
+  Process: 11235 ExecStartPre=/sbin/multipath -A (code=exited, status=0/SUCCESS)
+  Process: 11233 ExecStartPre=/sbin/modprobe dm-multipath (code=exited, status=0/SUCCESS)
+ Main PID: 11241 (multipathd)
+   CGroup: /system.slice/multipathd.service
+           ¢|¢w11241 /sbin/multipathd
+
+Mar 17 14:00:04 dr.devrgih.com systemd[1]: Starting Device-Mapper Multipath Device Controller...
+Mar 17 14:00:04 dr.devrgih.com systemd[1]: Started Device-Mapper Multipath Device Controller.
+Mar 17 14:00:05 dr.devrgih.com multipathd[11241]: mpatha: load table [0 20971520 multipath 1 queue_if_no_path 0 1 1 round-robin 0 2 1 8:96 1 8:16 1]
+Mar 17 14:00:05 dr.devrgih.com multipathd[11241]: mpathb: load table [0 2147483648 multipath 1 queue_if_no_path 0 1 1 round-robin 0 2 1 8:32 1 8:64 1]
+Mar 17 14:00:05 dr.devrgih.com multipathd[11241]: mpathc: load table [0 2147483648 multipath 1 queue_if_no_path 0 1 1 round-robin 0 2 1 8:48 1 8:80 1]
+Mar 17 14:00:05 dr.devrgih.com multipathd[11241]: mpatha: event checker started
+Mar 17 14:00:05 dr.devrgih.com multipathd[11241]: mpathb: event checker started
+Mar 17 14:00:05 dr.devrgih.com multipathd[11241]: mpathc: event checker started
+Mar 17 14:00:05 dr.devrgih.com multipathd[11241]: path checkers start up
+
+
+#############################################################################################################
+#  Setup password-less SSH
+#############################################################################################################
+-- In dr, create the key
+ssh-keygen -t rsa
+-- Store dr public key to node1 and node2
+ssh oracle@node1 mkdir -p .ssh
+cat .ssh/id_rsa.pub | ssh oracle@node1 'cat >> .ssh/authorized_keys'
+ssh oracle@node2 mkdir -p .ssh
+cat .ssh/id_rsa.pub | ssh oracle@node2 'cat >> .ssh/authorized_keys'
+
+
+#############################################################################################################
+# Create a RAC Standby Database
+#############################################################################################################
+Reference
+
+Creating a Standby using RMAN Duplicate (RAC or Non-RAC) (Doc ID 1617946.1)
+https://support.oracle.com/epmos/faces/DocumentDisplay?_afrLoop=358908801245972&id=1617946.1&_adf.ctrl-state=hhfgejx9e_77
+
+Create RAC physical standby database with Oracle RAC 12.1.0.2 and RMAN active duplication
+https://pierreforstmanndotcom.wordpress.com/2015/07/20/create-rac-physical-standby-database-with-oracle-rac-12-1-0-2-and-rman-active-duplication/
+
+How to Create a RAC Standby Database
+https://community.oracle.com/docs/DOC-1008570
+
+-----------------------------------------------------------------------------------------------------
+-- Put below entries in tnsnames.ora for node1,node2 and dr
+-----------------------------------------------------------------------------------------------------
+
+CDBRAC =
+  (DESCRIPTION =
+    (ADDRESS = (PROTOCOL = TCP)(HOST = scan)(PORT = 1521))
+    (CONNECT_DATA =
+      (SERVER = DEDICATED)
+      (SERVICE_NAME = cdbrac.lands)
+    )
+  )
+
+CDB2 =
+  (DESCRIPTION =
+    (ADDRESS = (PROTOCOL = TCP)(HOST = dr)(PORT = 1521))
+    (CONNECT_DATA =
+      (SERVER = DEDICATED)
+      (SERVICE_NAME = cdb12c.lands)
+    )
+  )
+
+
+-----------------------------------------------------------------------------------------------------
+-- Primary(node1,node2) server setup
+-----------------------------------------------------------------------------------------------------
+SHUTDOWN IMMEDIATE;
+STARTUP MOUNT;
+ALTER DATABASE ARCHIVELOG;
+ALTER DATABASE OPEN;
+  
+ALTER DATABASE FORCE LOGGING;
+  
+alter system set log_archive_dest_1='LOCATION=USE_DB_RECOVERY_FILE_DEST';
+alter system set log_archive_config='dg_config=(CDBRAC,cdb2)';
+alter system set log_archive_dest_2='service=cdb2 async valid_for=(online_logfile,primary_role) db_unique_name=cdb2';
+alter system set db_recovery_file_dest_size=500G;
+alter system set local_listener='' scope=both;
+
+-- Add standby redo log groups, assume groups 1-3 are for existing redo log groups
+alter database add standby logfile THREAD 1 group 5 ('+DATA/CDBRAC/srl01a.log','+FRA/CDBRAC/srl01b') SIZE 500M;
+alter database add standby logfile THREAD 1 group 6 ('+DATA/CDBRAC/srl02a.log','+FRA/CDBRAC/srl02b') SIZE 500M;
+alter database add standby logfile THREAD 1 group 7 ('+DATA/CDBRAC/srl03a.log','+FRA/CDBRAC/srl03b') SIZE 500M;
+
+alter database add standby logfile THREAD 2 group 8 ('+DATA/CDBRAC/srl04a.log','+FRA/CDBRAC/srl04b') SIZE 500M;
+alter database add standby logfile THREAD 2 group 9 ('+DATA/CDBRAC/srl05a.log','+FRA/CDBRAC/srl05b') SIZE 500M;
+alter database add standby logfile THREAD 2 group 10 ('+DATA/CDBRAC/srl06a.log','+FRA/CDBRAC/srl06b') SIZE 500M;
+
+
+ALTER SYSTEM SET LOG_ARCHIVE_MAX_PROCESSES=30;
+ALTER SYSTEM SET REMOTE_LOGIN_PASSWORDFILE=EXCLUSIVE SCOPE=SPFILE;
+ALTER SYSTEM SET STANDBY_FILE_MANAGEMENT=AUTO;
+
+ALTER DATABASE CREATE STANDBY CONTROLFILE AS '/tmp/cdb2.ctl';
+CREATE PFILE='/tmp/cdb2.ora' FROM SPFILE;
+
+Amend the PFILE making the entries relevant for the standby database. 
+1. Replace all 'cdbrac' with 'cdb2'
+2. Then change entries to these for the standby
+----------------------
+*.fal_server='cdbrac'
+*.log_archive_dest_2='SERVICE=cdbrac ASYNC VALID_FOR=(ONLINE_LOGFILES,PRIMARY_ROLE) DB_UNIQUE_NAME=cdbrac'
+*.local_listener=''
+*.cluster_database=false
+----------------------
+
+-- Copy the modified cdb2.ora and cdb2.ctl to dr site, say /tmp
+scp /tmp/cdb2.ctl dr:/tmp
+scp /tmp/cdb2.ora dr:/tmp
+
+-----------------------------------------------------------------------------------------------------
+-- Standby Server Setup (DUPLICATE)
+-----------------------------------------------------------------------------------------------------
+mkdir -p /u01/app/oracle/admin/cdb2/adump
+
+# Parameter file.
+scp -p oracle@node1:/tmp/cdb2.ora /tmp/cdb2.ora
+
+# Remote login password file.
+[oracle@node1 ~]$ srvctl config database -d CDBRAC | grep Pass
+Password file: +DATA/CDBRAC/PASSWORD/pwdcdbrac.256.938866709
+
+-- As grid user
+[grid@node1 ~]$ asmcmd cp +DATA/CDBRAC/PASSWORD/pwdcdbrac.256.938866709 /tmp/orapwcdb2
+copying +DATA/CDBRAC/PASSWORD/pwdcdbrac.256.938866709 -> /tmp/orapwcdb2
+
+-- As oracle user
+[oracle@node1 dbs]$ scp /tmp/orapwcdb2 dr:/u01/app/oracle/product/12.1.0/db_1/dbs/orapwcdb2
+
+# Restore standby control file
+sqlplus / as sysdba
+startup pfile='/tmp/cdb2.ora' nomount;
+
+rman target /
+RMAN> RESTORE CONTROLFILE FROM "/tmp/cdb2.ctl";
+
+Starting restore at 20-MAR-17
+using target database control file instead of recovery catalog
+allocated channel: ORA_DISK_1
+channel ORA_DISK_1: SID=769 device type=DISK
+
+channel ORA_DISK_1: copied control file copy
+output file name=+DATA/cdb2/control01.ctl
+output file name=+FRA/cdb2/control02.ctl
+Finished restore at 20-MAR-17
+
+RMAN> alter database mount;
+
+RMAN-00571: ===========================================================
+RMAN-00569: =============== ERROR MESSAGE STACK FOLLOWS ===============
+RMAN-00571: ===========================================================
+RMAN-03002: failure of sql statement command at 03/20/2017 17:21:34
+ORA-01103: database name 'CDBRAC' in control file is not 'CDB2'
+
+
+
+# Put below entry into "listener.ora"
+---------------------------------------------------------------------------
+SID_LIST_LISTENER =
+  (SID_LIST =
+    (SID_DESC =
+      (GLOBAL_DBNAME = cdb2.lands)
+      (ORACLE_HOME = /u01/app/oracle/product/12.1.0/db_1)
+      (SID_NAME = cdb2)
+    )
+  )
+
+LISTENER =
+  (DESCRIPTION_LIST =
+    (DESCRIPTION =
+      (ADDRESS = (PROTOCOL = TCP)(HOST = dr)(PORT = 1521))
+    )
+    (DESCRIPTION =
+      (ADDRESS = (PROTOCOL = IPC)(KEY = EXTPROC1521))
+    )
+  )
+
+ADR_BASE_LISTENER = /u01/app/oracle
+---------------------------------------------------------------------------
+
+-- login to dr site to startup in nomount
+export ORACLE_SID=cdb2
+sqlplus / as sysdba
+
+startup pfile='/tmp/cdb2.ora' nomount;
+
+-- Invoke RMAN to restore the standby control file
+RESTORE CONTROLFILE FROM "/tmp/cdb2.ctl";
+ALTER DATABASE MOUNT;
+
+-- shutdown the database
+sqlplus / as sysdba
+shutdown immediate
+
+# Startup listener
+lsnrctl start
+
+# Start the auxillary instance on the standby server by starting it using the temporary "init.ora" file.
+export ORACLE_SID=cdb2
+sqlplus / as sysdba
+
+STARTUP NOMOUNT PFILE='/tmp/cdb2.ora';
+
+-----------------------------------------------------------------------------------------------------
+-- Create Standby Using DUPLICATE
+-----------------------------------------------------------------------------------------------------
+-- Login node1 as oracle
+
+export ORACLE_SID=cdbrac1
+cd ~/script
+rman<<EOF
+connect target sys/password@cdbrac
+connect auxiliary sys/password@cdb2 
+@dupstby.rcv
+EOF
+
+
+#############################################################################################################
+# Site failover test, Switch back test
+#############################################################################################################
+--cdbrac is primary now
+SQL> select open_mode , database_role from v$database;
+OPEN_MODE            DATABASE_ROLE
+-------------------- ----------------
+READ WRITE           PRIMARY
+
+-- login node1 to insert a test record
+SQL> insert into C##TESTUSER.T1 values(999,'ZZZZZ');
+
+
+-- Verify cdb2(standby) is ready for switchover. Also check alertlog for error after this command
+SQL> alter database switchover to cdb2 verify;
+
+-- perform switchover to cdb2
+SQL>  alter database switchover to cdb2;
+
+-- Startup the original primary in mount mode and recover in managed standby. In node1
+sqlplus / as sysdba
+SQL> startup mount
+SQL> alter database recover managed standby database disconnect from session;
+
+-- Startup the original primary in mount mode. In node2, just mount it, no need to recover managed standby because already done in node1.
+sqlplus / as sysdba
+SQL> startup mount
+
+-- In new primary(cdb2), open the database
+SQL> select open_mode , database_role from v$database;
+OPEN_MODE            DATABASE_ROLE
+-------------------- ----------------
+MOUNTED              PHYSICAL STANDBY
+
+SQL> alter database open;
+
+Database altered.
+
+SQL> select open_mode , database_role from v$database;
+
+OPEN_MODE            DATABASE_ROLE
+-------------------- ----------------
+READ WRITE           PRIMARY
+
+-- Check that the test record is in the new primary
+SQL> select *from C##TESTUSER.T1;
+
+         A
+----------
+B
+--------------------------------------------------------------------------------
+       999
+ZZZZZ
+
+
+-- Now in new primary(cdb2), insert a test record
+SQL> insert into C##TESTUSER.T1 values (0,'XXXXX');
+
+-- Perform a switch back verify. Also check alertlog the verify result
+SQL> alter database switchover to cdbrac verify;
+
+-- Switch back to cdbrac. In cdb2, run below command
+SQL> alter database switchover to cdbrac;
+
+
+-- After the switch back, in cdb2, run below command to make it in managed standby mode
+sqlplus / as sysdba
+SQL> startup mount
+SQL> alter database recover managed standby database disconnect from session;
+
+-- In node1 and node2, startup the database
+SQL> select open_mode from v$database;
+OPEN_MODE
+--------------------
+MOUNTED
+
+SQL> alter database open ;
+
+-- Check the test record is there
+SQL> select *from C##TESTUSER.T1;
+         A
+----------
+B
+--------------------------------------------------------------------------------
+         0
+XXXXX
+
+#############################################################################################################
+# Issue during installation
+#############################################################################################################
+Problem: 
+While installing the grid, error as follows:
+The installer could not find the IP addresses you selected as SCAN addresses. This may be because they are assigned to another system, or the IP addresses are not listed in the DNS or hosts files as assigned to this domain name.
+
+Cause: 
+The SCAN IP are being used by others.
+
+Resolution: 
+Make sure ping the IP addresses of the SCAN don't return. It should be destination unreachable.
+
+---------------------------------------------------------------------------------------------------------------------
+
+If node1 failed, the node1-vip will fail over to node2, you can relocate it back to node1 when node1 is normal.
+
+[grid@node2 ~]$ srvctl relocate vip -vip node1-vip.devrgih.com -n node1
+
+---------------------------------------------------------------------------------------------------------------------
+Problem: 
+When restoring the standby control file to DR site in setting up the physical standby, found below error
+
+RMAN> RESTORE CONTROLFILE FROM "/tmp/cdb2.ctl";
+
+Starting restore at 20-MAR-17
+using target database control file instead of recovery catalog
+allocated channel: ORA_DISK_1
+channel ORA_DISK_1: SID=1153 device type=DISK
+
+RMAN-00571: ===========================================================
+RMAN-00569: =============== ERROR MESSAGE STACK FOLLOWS ===============
+RMAN-00571: ===========================================================
+RMAN-03002: failure of restore command at 03/20/2017 11:02:15
+ORA-19504: failed to create file "+DATA/cdb2/control01.ctl"
+ORA-17502: ksfdcre:3 Failed to create file +DATA/cdb2/control01.ctl
+ORA-15001: diskgroup "DATA" does not exist or is not mounted
+ORA-15040: diskgroup is incomplete
+ORA-19600: input file is control file  (/tmp/cdb2.ctl)
+ORA-19601: output file is control file  (+DATA/cdb2/control01.ctl)
+
+
+Cause and solution:
+Database Will Not Mount: ORA-15025, ORA-27041, 'Permission denied', ORA-15081 (Doc ID 1378747.1)
+
+-- Check existing id
+[grid@dr trace]$ id oracle
+uid=1101(oracle) gid=1010(oinstall) groups=1010(oinstall),1021(asmdba),1022(asmoper),1031(dba),1032(oper)
+[grid@dr trace]$ id grid
+uid=1100(grid) gid=1010(oinstall) groups=1010(oinstall),1020(asmadmin),1021(asmdba),1022(asmoper),1031(dba)
+
+# ls -ltra /dev/oracleasm/disks/*
+[grid@dr trace]$ ls -ltra /dev/oracleasm/disks/*
+brw-rw---- 1 grid asmadmin 8, 48 Mar 20 11:52 /dev/oracleasm/disks/ASMDISK03
+brw-rw---- 1 grid asmadmin 8, 16 Mar 20 11:52 /dev/oracleasm/disks/ASMDISK02
+brw-rw---- 1 grid asmadmin 8, 32 Mar 20 11:52 /dev/oracleasm/disks/ASMDISK01
+
+-- Check existing oracle permission, it should have "asmadmin" group in the $ORACLE_HOME
+[grid@dr trace]$ ls -ltr /u01/app/oracle/product/12.1.0/db_1/bin/oracle
+-rwsr-s--x 1 oracle oinstall 323649840 Mar 14 15:29 /u01/app/oracle/product/12.1.0/db_1/bin/oracle
+[grid@dr trace]$ ls -ltr /u01/app/12.1.0/grid/bin/oracle
+-rwsr-s--x 1 grid oinstall 291255040 Mar 14 15:16 /u01/app/12.1.0/grid/bin/oracle
+
+As the <asm_home sfw owner>:
+$ cd <asm_home>/bin
+$ ./setasmgidwrap o=<db_home>/bin/oracle
+
+[grid@dr bin]$ pwd
+/u01/app/12.1.0/grid/bin
+[grid@dr bin]$ ls setasmgidwrap
+setasmgidwrap
+[grid@dr bin]$
+[grid@dr bin]$ ./setasmgidwrap o=/u01/app/oracle/product/12.1.0/db_1/bin/oracle
+[grid@dr bin]$ ls -ltr /u01/app/oracle/product/12.1.0/db_1/bin/oracle
+-rwsr-s--x 1 oracle asmadmin 323649840 Mar 14 15:29 /u01/app/oracle/product/12.1.0/db_1/bin/oracle
+[grid@dr bin]$ ls -ltr /u01/app/12.1.0/grid/bin/oracle
+-rwsr-s--x 1 grid oinstall 291255040 Mar 14 15:16 /u01/app/12.1.0/grid/bin/oracle
+[grid@dr bin]$
+
+Note: The /u01/app/oracle/product/12.1.0/db_1/bin/oracle now belongs to "oracle asmadmin" 
+
+
+-- Cannot shutdown oracle after running setasmgidwrap
+SQL> shutdown immediate;
+ERROR:
+ORA-27140: attach to post/wait facility failed
+ORA-27300: OS system dependent operation:invalid_egid failed with status: 1
+ORA-27301: OS failure message: Operation not permitted
+ORA-27302: failure occurred at: skgpwinit6
+ORA-27303: additional information: startup egid = 1010 (oinstall), current egid
+= 1020 (asmadmin)
+
+
+-- Kill the ora_smon_cdb2 manually, and then startup again
+[oracle@dr ~]$ kill -9 31423
+
+-- Add oracle to asmadmin group if it is not yet
+usermod -a -G asmadmin oracle
+
+SQL> startup pfile='/tmp/cdb2.ora' nomount;
+ORACLE instance started.
+
+---------------------------------------------------------------------------------------------------------------------
+Problem:
+On reboot in asm alert, shows error in mounting asm disks...
+
+
+SQL> ALTER DISKGROUP GRID MOUNT  /* asm agent *//* {0:0:2} */
+Mon Mar 20 17:40:24 2017
+SQL> ALTER DISKGROUP FRA MOUNT  /* asm agent *//* {0:0:2} */
+Mon Mar 20 17:40:24 2017
+WARNING: Library 'ASM Library - Generic Linux, version 2.0.12 (KABI_V2)' does not support advanced format disks
+Mon Mar 20 17:40:24 2017
+ORA-15186: ASMLIB error function = [asm_open(global)],  error = [1],  mesg = [Operation not permitted]
+ORA-15025: could not open disk "ORCL:ASMDISK01"
+Mon Mar 20 17:40:24 2017
+ORA-15186: ASMLIB error function = [asm_open(global)],  error = [1],  mesg = [Operation not permitted]
+ORA-15025: could not open disk "ORCL:ASMDISK02"
+Mon Mar 20 17:40:24 2017
+ORA-15186: ASMLIB error function = [asm_open(global)],  error = [1],  mesg = [Operation not permitted]
+ORA-15025: could not open disk "ORCL:ASMDISK03"
+Mon Mar 20 17:40:24 2017
+WARNING: Read Failed. group:0 disk:0 AU:0 offset:0 size:4096
+path:Unknown disk
+         incarnation:0xe969cfc4 asynchronous result:'I/O error'
+         subsys:Unknown library krq:0x7f9198c34200 bufp:0x7f9198c33000 osderr1:0x0 osderr2:0x0
+         IO elapsed time: 0 usec Time waited on I/O: 0 usec
+WARNING: Read Failed. group:0 disk:1 AU:0 offset:0 size:4096
+path:Unknown disk
+         incarnation:0xe969cfc5 asynchronous result:'I/O error'
+         subsys:Unknown library krq:0x7f9198c31db0 bufp:0x7f91943ba000 osderr1:0x0 osderr2:0x0
+         IO elapsed time: 0 usec Time waited on I/O: 0 usec
+WARNING: Read Failed. group:0 disk:2 AU:0 offset:0 size:4096
+path:Unknown disk
+         incarnation:0xe969cfc6 asynchronous result:'I/O error'
+         subsys:Unknown library krq:0x7f9198c31990 bufp:0x7f91943b8000 osderr1:0x0 osderr2:0x0
+         IO elapsed time: 0 usec Time waited on I/O: 0 usec
+Mon Mar 20 17:40:24 2017
+ERROR: no read quorum in group: required 2, found 0 disks
+Mon Mar 20 17:40:24 2017
+NOTE: cache dismounting (clean) group 1/0x06493F34 (DATA)
+NOTE: messaging CKPT to quiesce pins Unix process pid: 3563, image: oracle@dr.devrgih.com (TNS V1-V3)
+NOTE: dbwr not being msg'd to dismount
+NOTE: LGWR not being messaged to dismount
+
+
+Cause and Solution:
+Mount ASM Disk Group Fails : ORA-15186, ORA-15025, ORA-15063 (Doc ID 1384504.1)
+
+After modifying the /etc/sysconfig/oracleasm with below entries, and reboot, the asm disks can be mounted. Seems the command "oracleasm configure -i" not working...
+# ORACLEASM_SCANORDER: Matching patterns to order disk scanning
+ORACLEASM_SCANORDER="mpath dm"
+
+# ORACLEASM_SCANEXCLUDE: Matching patterns to exclude disks from scan
+ORACLEASM_SCANEXCLUDE="sd"
+
+
+---------------------------------------------------------------------------------------------------------------------
+Problem:
+Failed to connect to auxiliary database before duplicate standby from active 
+
+
+[oracle@dr dbs]$ rman target sys/password@cdbrac auxiliary sys/password@cdb2
+
+Recovery Manager: Release 12.1.0.2.0 - Production on Tue Mar 21 19:17:35 2017
+
+Copyright (c) 1982, 2014, Oracle and/or its affiliates.  All rights reserved.
+
+connected to target database: CDBRAC (DBID=424463080)
+RMAN-00571: ===========================================================
+RMAN-00569: =============== ERROR MESSAGE STACK FOLLOWS ===============
+RMAN-00571: ===========================================================
+RMAN-00554: initialization of internal recovery manager package failed
+RMAN-04006: error from auxiliary database: ORA-01017: invalid username/password                                                                                ; logon denied
+
+
+Cause:
+The listener.ora in /u01/app/12.1.0/grid/network/admin/listener.ora was incorrectly set. The ORACLE_HOME should not point to /u01/app/12.1.0/grid. It should point to as follows:
+If it points to the Grid /u01/app/12.1.0/grid, it will fail to find the password file because there is no password file under /u01/app/12.1.0/grid/dbs.
+
+# listener.ora Network Configuration File: /u01/app/12.1.0/grid/network/admin/listener.ora
+# Generated by Oracle configuration tools.
+
+SID_LIST_LISTENER =
+  (SID_LIST =
+    (SID_DESC =
+      (GLOBAL_DBNAME = cdb2.lands)
+#      (ORACLE_HOME = /u01/app/12.1.0/grid)
+      (ORACLE_HOME = /u01/app/oracle/product/12.1.0/db_1)
+      (SID_NAME = cdb2)
+    )
+  )
+
+LISTENER =
+  (DESCRIPTION_LIST =
+    (DESCRIPTION =
+      (ADDRESS = (PROTOCOL = TCP)(HOST = dr.devrgih.com)(PORT = 1521))
+      (ADDRESS = (PROTOCOL = IPC)(KEY = EXTPROC1521))
+    )
+  )
+
+ENABLE_GLOBAL_DYNAMIC_ENDPOINT_LISTENER=ON              # line added by Agent
+VALID_NODE_CHECKING_REGISTRATION_LISTENER=SUBNET                # line added by Agent
+
+--------------------------------------------------------------------------------------------------------------------
+
+
+[grid@dr ~]$ cd $ORACLE_HOME
+[grid@dr grid]$ cd deinstall/
+[grid@dr deinstall]$ ls
+bootstrap_files.lst  bootstrap.pl  deinstall  deinstall.pl  deinstall.xml  jlib  readme.txt  response  sshUserSetup.sh  utl
+[grid@dr deinstall]$ cd /source/oracle/12cR1/
+[grid@dr 12cR1]$ ls
+ASM  compat-libstdc++-33-3.2.3-71.el7.x86_64.rpm  database  grid  One-off  OPatch  p21948354_121020_Linux-x86-64.zip  PSU
+[grid@dr 12cR1]$ cd grid/
+[grid@dr grid]$ ls
+install  linuxamd64_12102_grid_1of2.zip  linuxamd64_12102_grid_2of2.zip  response  rpm  runcluvfy.sh  runInstaller  sshsetup  stage  welcome.html
+[grid@dr grid]$
+
+
+
+#############################################################################################################
+# Useful commands
+#############################################################################################################
+[root@node2 ~]# rpm -qa |grep asmlib
+oracleasmlib-2.0.12-1.el7.x86_64
+[root@node2 ~]# rpm -qa |grep kmod
+kmod-20-9.el7.x86_64
+kmod-libs-20-9.el7.x86_64
+kmod-oracleasm-2.0.8-17.0.1.el7.x86_64
+
+----------------------------------------------------------------------------------------------------------------
+
+[root@node1 bin]# ./crsctl stat res -t
+
+----------------------------------------------------------------------------------------------------------------
+
+[grid@node1 ~]$ asmcmd
+ASMCMD> cd +FRA
+ASMCMD> cd archivelog
+ASMCMD> ls
+2017_03_17/
+ASMCMD> pwd
++FRA/CDBRAC/archivelog
+ASMCMD> cd +FRA
+ASMCMD> ls
+CDBRAC/
+
+----------------------------------------------------------------------------------------------------------------
+
+SQL> select * from v$log_files;
+
+[root@node1 tmp]# dd if=/dev/null of=/dev/mapper/mpathc count=10000000
+0+0 records in
+0+0 records out
+0 bytes (0 B) copied, 0.000206686 s, 0.0 kB/s
+
+----------------------------------------------------------------------------------------------------------------
+
+[grid@dr dbs]$ asmcmd
+ASMCMD> ls
+DATA/
+FRA/
+GRID/
+ASMCMD> cd +DATA
+ASMCMD> ls
+CDB2/
+ASMCMD> cd CDB2
+ASMCMD> ls
+CONTROLFILE/
+control01.ctl
+ASMCMD> mkdir PASSWORD
+ASMCMD> pwcopy                                                                                                                                                 usage: pwcopy [ --dbuniquename <string> | --asm ]
+        <source_path> <destination_path>
+help:  help pwcopy
+ASMCMD> pwcopy /u01/app/oracle/product/12.1.0/db_1/dbs/orapwcdb2 +DATA/CDB2/PASSWORD
+copying /u01/app/oracle/product/12.1.0/db_1/dbs/orapwcdb2 -> +DATA/CDB2/PASSWORD/orapwcdb2
+ASMCMD> cd +DATA/CDB2/PASSWORD/orapwcdb2
+ASMCMD-8006: entry '+DATA/CDB2/PASSWORD/orapwcdb2' does not refer to an existin                                                                                g directory
+ASMCMD> cd +DATA/CDB2/PASSWORD/
+ASMCMD> ls
+orapwcdb2
+
+----------------------------------------------------------------------------------------------------------------
+
+[oracle@dr dbs]$ srvctl config database -d cdb2
+Database unique name: cdb2
+Database name:
+Oracle home: /u01/app/oracle/product/12.1.0/db_1
+Oracle user: oracle
+Spfile: +DATA/CDB2/spfilecdb2.ora
+Password file: /u01/app/oracle/product/12.1.0/db_1/dbs/orapwcdb2
+Domain: lands
+Start options: open
+Stop options: immediate
+Database role: PRIMARY
+Management policy: AUTOMATIC
+Disk Groups: FRA,DATA
+Services:
+OSDBA group:
+OSOPER group:
+Database instance: cdb2
+
+
+#############################################################################################################
+# FAQ
+#############################################################################################################
+-----------------------------------------------------------------------------------------------------------------------
+-- Start/stop ASM
+-----------------------------------------------------------------------------------------------------------------------
+-- login as grid
+-- shutdown the dependent instance first, say in node1, shutdown mgmtdb and cdbrac1 first.
+srvctl stop mgmtdb
+srvctl stop instance -d cdbrac -i cdbrac1
+
+-- shutdown ASM
+ASMCMD> shutdown --abort
+
+
+-- Check status, the ASM dependent components in node1 will show OFFLINE
+[grid@node1 ~]$ chkcrsres
+--------------------------------------------------------------------------------
+Name           Target  State        Server                   State details
+--------------------------------------------------------------------------------
+Local Resources
+--------------------------------------------------------------------------------
+ora.DATA.dg
+               OFFLINE OFFLINE      node1                    STABLE
+               ONLINE  ONLINE       node2                    STABLE
+ora.FRA.dg
+               OFFLINE OFFLINE      node1                    STABLE
+               ONLINE  ONLINE       node2                    STABLE
+ora.LISTENER.lsnr
+               ONLINE  ONLINE       node1                    STABLE
+               ONLINE  ONLINE       node2                    STABLE
+ora.OCRVOTE.dg
+               OFFLINE OFFLINE      node1                    STABLE
+               ONLINE  ONLINE       node2                    STABLE
+ora.asm
+               OFFLINE OFFLINE      node1                    Instance Shutdown,ST
+                                                             ABLE
+               ONLINE  ONLINE       node2                    Started,STABLE
+ora.net1.network
+               ONLINE  ONLINE       node1                    STABLE
+               ONLINE  ONLINE       node2                    STABLE
+ora.ons
+               ONLINE  ONLINE       node1                    STABLE
+               ONLINE  ONLINE       node2                    STABLE
+--------------------------------------------------------------------------------
+Cluster Resources
+--------------------------------------------------------------------------------
+ora.LISTENER_SCAN1.lsnr
+      1        ONLINE  ONLINE       node1                    STABLE
+ora.LISTENER_SCAN2.lsnr
+      1        ONLINE  ONLINE       node2                    STABLE
+ora.LISTENER_SCAN3.lsnr
+      1        ONLINE  ONLINE       node2                    STABLE
+ora.MGMTLSNR
+      1        ONLINE  ONLINE       node1                    169.254.86.15 30.30.
+                                                             30.1,STABLE
+ora.cdbrac.db
+      1        OFFLINE OFFLINE                               Instance Shutdown,ST
+                                                             ABLE
+      2        ONLINE  ONLINE       node2                    Open,STABLE
+ora.cvu
+      1        ONLINE  ONLINE       node2                    STABLE
+ora.mgmtdb
+      1        ONLINE  OFFLINE                               STABLE
+ora.node1.vip
+      1        ONLINE  ONLINE       node1                    STABLE
+ora.node2.vip
+      1        ONLINE  ONLINE       node2                    STABLE
+ora.oc4j
+      1        ONLINE  ONLINE       node2                    STABLE
+ora.scan1.vip
+      1        ONLINE  ONLINE       node1                    STABLE
+ora.scan2.vip
+      1        ONLINE  ONLINE       node2                    STABLE
+ora.scan3.vip
+      1        ONLINE  ONLINE       node2                    STABLE
+--------------------------------------------------------------------------------
+
+
+-- Startup the ASM in asmcmd
+[grid@node1 ~]$ asmcmd
+Connected to an idle instance.
+ASMCMD> startup
+ASM instance started
+
+Total System Global Area 1140850688 bytes
+Fixed Size                  2933400 bytes
+Variable Size            1112751464 bytes
+ASM Cache                  25165824 bytes
+ASM diskgroups mounted
+
+-- Check disks are mounted
+ASMCMD> lsdsk
+Path
+/dev/mapper/mpatha
+/dev/mapper/mpathb
+/dev/mapper/mpathc
+/dev/mapper/mpathd
+/dev/mapper/mpathe
+ASMCMD>
+
+-- Startup the ASM dependent resources
+srvctl start mgmtdb
+srvctl start instance -d cdbrac -i cdbrac1
+
+-- Check resource status again
+[grid@node1 ~]$ chkcrsres
+--------------------------------------------------------------------------------
+Name           Target  State        Server                   State details
+--------------------------------------------------------------------------------
+Local Resources
+--------------------------------------------------------------------------------
+ora.DATA.dg
+               ONLINE  ONLINE       node1                    STABLE
+               ONLINE  ONLINE       node2                    STABLE
+ora.FRA.dg
+               ONLINE  ONLINE       node1                    STABLE
+               ONLINE  ONLINE       node2                    STABLE
+ora.LISTENER.lsnr
+               ONLINE  ONLINE       node1                    STABLE
+               ONLINE  ONLINE       node2                    STABLE
+ora.OCRVOTE.dg
+               ONLINE  ONLINE       node1                    STABLE
+               ONLINE  ONLINE       node2                    STABLE
+ora.asm
+               ONLINE  ONLINE       node1                    STABLE
+               ONLINE  ONLINE       node2                    Started,STABLE
+ora.net1.network
+               ONLINE  ONLINE       node1                    STABLE
+               ONLINE  ONLINE       node2                    STABLE
+ora.ons
+               ONLINE  ONLINE       node1                    STABLE
+               ONLINE  ONLINE       node2                    STABLE
+--------------------------------------------------------------------------------
+Cluster Resources
+--------------------------------------------------------------------------------
+ora.LISTENER_SCAN1.lsnr
+      1        ONLINE  ONLINE       node1                    STABLE
+ora.LISTENER_SCAN2.lsnr
+      1        ONLINE  ONLINE       node2                    STABLE
+ora.LISTENER_SCAN3.lsnr
+      1        ONLINE  ONLINE       node2                    STABLE
+ora.MGMTLSNR
+      1        ONLINE  ONLINE       node1                    169.254.86.15 30.30.
+                                                             30.1,STABLE
+ora.cdbrac.db
+      1        ONLINE  ONLINE       node1                    Open,STABLE
+      2        ONLINE  ONLINE       node2                    Open,STABLE
+ora.cvu
+      1        ONLINE  ONLINE       node2                    STABLE
+ora.mgmtdb
+      1        ONLINE  ONLINE       node1                    Open,STABLE
+ora.node1.vip
+      1        ONLINE  ONLINE       node1                    STABLE
+ora.node2.vip
+      1        ONLINE  ONLINE       node2                    STABLE
+ora.oc4j
+      1        ONLINE  ONLINE       node2                    STABLE
+ora.scan1.vip
+      1        ONLINE  ONLINE       node1                    STABLE
+ora.scan2.vip
+      1        ONLINE  ONLINE       node2                    STABLE
+ora.scan3.vip
+      1        ONLINE  ONLINE       node2                    STABLE
+--------------------------------------------------------------------------------
+[grid@node1 ~]$
+
+
+
+
+
+
+
+#############################################################################################################
+# appendix
+#############################################################################################################
+-----------------------------------------------------------------------------------------------------------------------
+-- dupstby.rcv 
+-----------------------------------------------------------------------------------------------------------------------
+run {
+duplicate target database for standby from active database
+dorecover
+NOFILENAMECHECK
+spfile
+parameter_value_convert 'cdbrac','cdb2'
+set db_unique_name='cdb2'
+set db_recovery_file_dest='+FRA'
+set db_file_name_convert='/cdbrac/','/cdb2/'
+set log_file_name_convert='/cdbrac/','/cdb2/'
+set fal_client='cdb2'
+set fal_server='cdbrac'
+set standby_file_management='AUTO'
+set log_archive_config='dg_config=(cdbrac,cdb2)'
+set log_archive_dest_2='service=cdbrac ASYNC valid_for=(ONLINE_LOGFILE,PRIMARY_ROLE) db_unique_name=cdbrac'
+;
+}
+
+
+-----------------------------------------------------------------------------------------------------------------------
+-- /tmp/cdb2.ora , PFILE for standby database 
+-----------------------------------------------------------------------------------------------------------------------
+*.__data_transfer_cache_size=0
+*.__db_cache_size=4982833152
+*.__java_pool_size=16777216
+*.__large_pool_size=33554432
+*.__oracle_base='/u01/app/oracle'#ORACLE_BASE set from environment
+*.__pga_aggregate_target=2147483648
+*.__sga_target=6442450944
+*.__shared_io_pool_size=318767104
+*.__shared_pool_size=1073741824
+*.__streams_pool_size=0
+*.audit_file_dest='/u01/app/oracle/admin/cdb2/adump'
+*.audit_trail='db'
+*.cluster_database=false
+*.compatible='12.1.0.2.0'
+*.control_files='+DATA/cdb2/control01.ctl','+FRA/cdb2/control02.ctl'
+*.db_block_size=16384
+*.db_domain='lands'
+*.db_name='cdb2'
+*.db_recovery_file_dest='+FRA'
+*.db_recovery_file_dest_size=536870912000
+*.diagnostic_dest='/u01/app/oracle'
+*.dispatchers='(PROTOCOL=TCP) (SERVICE=cdbracXDB)'
+*.enable_pluggable_database=true
+*.instance_number=1
+*.local_listener=''
+*.log_archive_config='dg_config=(CDBRAC,cdb2)'
+*.log_archive_dest_1='LOCATION=USE_DB_RECOVERY_FILE_DEST'
+*.log_archive_format='%t_%s_%r.dbf'
+*.log_archive_max_processes=30
+*.nls_language='TRADITIONAL CHINESE'
+*.nls_territory='HONG KONG'
+*.open_cursors=1000
+*.pga_aggregate_target=2048m
+*.processes=1000
+*.remote_login_passwordfile='EXCLUSIVE'
+*.sga_target=6144m
+*.standby_file_management='AUTO'
+*.fal_server='cdbrac'
+*.log_archive_dest_2='service=cdbrac async valid_for=(online_logfile,primary_role) db_unique_name=cdbrac'
+*.thread=1
+*.undo_tablespace='UNDOTBS1'
+*.db_unique_name='cdb2'
+
+
+
+-----------------------------------------------------------------------------------------------------------------------
+-- .bash_profile (for oracle) 
+-----------------------------------------------------------------------------------------------------------------------
+# User specific environment and startup programs
+PATH=$PATH:$HOME/.local/bin:$HOME/bin
+
+export PATH
+
+export TMP=/tmp
+export TMPDIR=$TMP
+
+export ORACLE_HOSTNAME=node1.devrgih.com
+export HOSTNAME=node1
+export ORACLE_UNQNAME=cdbrac
+export ORACLE_SID=cdbrac1
+
+export ORACLE_BASE=/u01/app/oracle
+export ORACLE_HOME=$ORACLE_BASE/product/12.1.0/db_1
+export ORACLE_TERM=xterm
+export BASE_PATH=/usr/sbin:$PATH
+export PATH=$ORACLE_HOME/bin:$BASE_PATH
+
+export LD_LIBRARY_PATH=$ORACLE_HOME/lib:/lib:/usr/lib
+export CLASSPATH=$ORACLE_HOME/JRE:$ORACLE_HOME/jlib:$ORACLE_HOME/rdbms/jlib
+
+alias alert='view $ORACLE_BASE/diag/rdbms/$ORACLE_UNQNAME/$ORACLE_SID/trace/alert_${ORACLE_SID}.log'
+alias tnsora='view $ORACLE_HOME/network/admin/tnsnames.ora'
+
+alias ls='ls -ltr'
+alias psora='ps -ef |grep oracle'
+alias psgrid='ps -ef |grep grid'
+alias ol='sqlplus / as sysdba'
+
+alias stoprac1='srvctl stop instance -d cdbrac -i cdbrac1'
+alias stoprac2='srvctl stop instance -d cdbrac -i cdbrac2'
+alias startrac1='srvctl start instance -d cdbrac -i cdbrac1'
+alias startrac2='srvctl start instance -d cdbrac -i cdbrac2'
+
+
+-----------------------------------------------------------------------------------------------------------------------
+-- .bash_profile (for grid) 
+-----------------------------------------------------------------------------------------------------------------------
+# User specific environment and startup programs
+PATH=$PATH:$HOME/.local/bin:$HOME/bin
+
+export PATH
+
+export TMP=/tmp
+export TMPDIR=$TMP
+
+export ORACLE_HOSTNAME=node1.devrgih.com
+export HOSTNAME=node1
+export ORACLE_SID=+ASM1
+
+export GRID_BASE=/u01/app/grid
+export GRID_HOME=/u01/app/12.1.0/grid
+export ORACLE_HOME=$GRID_HOME
+export ORACLE_TERM=xterm
+export BASE_PATH=/usr/sbin:$PATH
+export PATH=$ORACLE_HOME/bin:$BASE_PATH
+
+export LD_LIBRARY_PATH=$ORACLE_HOME/lib:/lib:/usr/lib
+export CLASSPATH=$ORACLE_HOME/JRE:$ORACLE_HOME/jlib:$ORACLE_HOME/rdbms/jlib
+
+alias alertasm='view ${GRID_BASE}/diag/asm/+asm/$ORACLE_SID/trace/alert_$ORACLE_SID.log'
+alias alertlsnr='view ${GRID_BASE}/diag/tnslsnr/${HOSTNAME}/listener/trace/listener.log'
+
+alias ls='ls -ltr'
+alias psora='ps -ef |grep oracle'
+alias psgrid='ps -ef |grep grid'
+alias ol='sqlplus / as sysdba'
+
+alias chkcrs='crsctl check crs'
+alias chkcrsres='crsctl status res -t'
+alias chkcrsall='crsctl check cluster -all'
+alias stopcrsall='crsctl stop cluster -all'
+alias startcrsall='crsctl start cluster -all'
+alias encrs='crsctl enable crs'
+alias discrs='crsctl disable crs'
+
+
+-----------------------------------------------------------------------------------------------------------------------
+-- .bash_profile (for root) 
+-----------------------------------------------------------------------------------------------------------------------
+# User specific environment and startup programs
+
+PATH=$PATH:$HOME/bin
+
+export PATH
+
+
+export TMP=/tmp
+export TMPDIR=$TMP
+
+export ORACLE_HOSTNAME=node1.devrgih.com
+export HOSTNAME=node1
+
+export GRID_BASE=/u01/app/grid
+export GRID_HOME=/u01/app/12.1.0/grid
+export ORACLE_HOME=$GRID_HOME
+export ORACLE_TERM=xterm
+export BASE_PATH=/usr/sbin:$PATH
+export PATH=$ORACLE_HOME/bin:$BASE_PATH
+
+export LD_LIBRARY_PATH=$ORACLE_HOME/lib:/lib:/usr/lib
+export CLASSPATH=$ORACLE_HOME/JRE:$ORACLE_HOME/jlib:$ORACLE_HOME/rdbms/jlib
+
+alias alertcrs='view ${GRID_BASE}/diag/crs/$HOSTNAME/crs/trace/alert.log'
+
+alias chkcrs='crsctl check crs'
+alias chkcrsres='crsctl status res -t'
+alias chkcrsall='crsctl check cluster -all'
+alias stopcrsall='crsctl stop cluster -all'
+alias startcrsall='crsctl start cluster -all'
+alias encrs='crsctl enable crs'
+alias discrs='crsctl disable crs'
+
+
+
+
