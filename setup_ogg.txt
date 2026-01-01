@@ -1,0 +1,1186 @@
+Tasks 
+. Setup goldengate testing environment and test basic bidirectional replication between 8140 and 8141
+. Test CPU patch in gdat8140 and gdat8141 (Do some DML during patching to queue txn. Switch replication. Switch back.)
+. Test sequence replication
+. Test whether esri st_geometry data type can be replicated
+. Re-sync data
+. DDL change procedure, no matter automatic or manual
+. Monitoring and support issue in cloud
+. Test Oracle upgrade from 12.1.0.1 to 12.1.0.2 (in place upgrade because OGG tied to an oracle home during setup)
+. Test OGG upgrade from 12.1.2.1.0 to 12.2
+. Load test of OGG
+. FAQ (to see faqs, search for "how to")
+. Errors 
+. Notes
+
+Date
+Feb 2016
+
+Environment
+hosts: gdat8140, gdat8141 (windows 2008 R2)
+Oracle db : 12.1.0.1
+OGG: 12.1.2.1.0
+gdat8140 container.schema: pdb1.scapp 
+gdat8141 container.schema: pdb.scapp
+
+Reference
+	Oracle Learning Library: 
+		Configuring Integrated Extract and Integrated Replicat Using Oracle GoldenGate 12c on Linux
+		Oracle GoldenGate Automation Using Scripts
+		Oracle GoldenGate Interactive Upgrade Guide
+		Oracle GoldenGate on Linux: Bidirectional Replication from Oracle 11gR2 to Oracle 11gR2
+		http://www.oracle.com/webfolder/technetwork/tutorials/obe/fmw/goldengate/12c/OGG12c_Integrated_Replicat/index.html
+
+	Document ID 1960719.1
+		Oracle GoldenGate 12c Tutorial Oracle to Oracle Replication with Oracle Multitenant Version 12.1
+	
+	
+Website
+	Oracle DBA - Tips and Techniques
+		Oracle GoldenGate Tutorial 7 ¡V configuring DDL synchronization
+		http://gavinsoorma.com/2010/02/oracle-goldengate-tutorial-7-configuring-ddl-synchronization/
+
+	Configuring Oracle GoldenGate for Active-Active High Availability
+		https://docs.oracle.com/goldengate/1212/gg-winux/GWUAD/wu_bidirectional.htm#GWUAD282
+
+	Configuration Guidelines for DDL Support
+		https://docs.oracle.com/goldengate/1212/gg-winux/GIORA/ddl.htm#GIORA297
+
+		
+############################################################################################################
+# Setup goldengate testing environment and test basic bidirectional replication between 8140 and 8141
+############################################################################################################
+
+gdat8140,gdat8141 cdb
+------------------------------------
+ALTER DATABASE ADD SUPPLEMENTAL LOG DATA; 
+ALTER DATABASE FORCE LOGGING;
+ALTER SYSTEM SWITCH LOGFILE;
+SELECT supplemental_log_data_min, force_logging FROM v$database;
+ALTER SYSTEM SWITCH LOGFILE;  
+
+gdat8140 pdb1
+------------------------------------
+CREATE TABLESPACE scapp
+DATAFILE 'D:\ORADATA\CDB12C\PDB1\PDB1_scapp01.DBF' SIZE 512M REUSE
+AUTOEXTEND ON NEXT 80
+MAXSIZE UNLIMITED
+EXTENT MANAGEMENT LOCAL
+AUTOALLOCATE
+ONLINE;
+
+gdat8141 pdb
+--------------------------------------------
+CREATE TABLESPACE scapp
+DATAFILE 'D:\ORADATA1\CDB12C\PDB\PDB_scapp01.DBF' SIZE 512M REUSE
+AUTOEXTEND ON NEXT 80
+MAXSIZE UNLIMITED
+EXTENT MANAGEMENT LOCAL
+AUTOALLOCATE
+ONLINE;
+
+
+gdat8140,gdat8141 cdb
+------------------------------------------------------------------------
+Note: If the source database is a multitenant container database, 
+the Extract user must be a common user and must log into the root container.
+
+create user C##OGGUSER identified by abc123 default tablespace USERS temporary tablespace TEMP CONTAINER=ALL;
+exec dbms_goldengate_auth.grant_admin_privilege('C##OGGUSER',container=>'ALL');
+grant DBA to C##OGGUSER CONTAINER=ALL;
+
+-- exec dbms_streams_auth.grant_admin_privilege('C##OGGUSER')
+-- dbms_goldengate_auth.grant_admin_privilege('C##OGGUSER')
+-- dbms_goldengate_auth.revoke_admin_privilege('C##OGGUSER')
+
+
+gdat8140 pdb1
+--------------------------------------------
+create user scapp identified by abc123 default tablespace scapp temporary tablespace TEMP;
+grant CONNECT,RESOURCE to scapp;
+alter user scapp quota unlimited on scapp;
+
+
+gdat8141 pdb
+--------------------------------------------
+create user scapp identified by abc123 default tablespace scapp temporary tablespace TEMP;
+alter user scapp quota unlimited on scapp;
+grant CONNECT,RESOURCE to scapp;
+
+
+gdat8140 pdb1, gdat8141 pdb
+--------------------------------------------
+CREATE TABLE scapp.syslog
+( logdate timestamp NOT NULL,
+  remark varchar2(60),
+  CONSTRAINT logdate_pk PRIMARY KEY (logdate)
+);
+
+
+gdat8140 pdb1
+--------------------------------------------
+Login as scapp to populate tables
+@<OGG_INSTALL_DIR>/demo_ora_create.sql
+
+
+gdat8141 pdb1
+--------------------------------------------
+Login as scapp to populate tables
+@<OGG_INSTALL_DIR>/demo_ora_create.sql
+
+
+gdat8140, gdat8141
+--------------------------------------------
+Edit the parameters in ggsci
+> edit param mgr
+
+PORT 7809
+DynamicPortList 20000-20099
+Autostart ER *
+AUTORESTART ER *, WaitMinutes 1, Retries 3      
+PURGEOLDEXTRACTS ./dirdat/in*, USECHECKPOINTS, MINKEEPDAYS 30
+PURGEOLDEXTRACTS ./dirdat/pn*, USECHECKPOINTS, MINKEEPDAYS 30
+
+
+gdat8140, gdat8141
+--------------------------------------------
+Stop and Start mgr to refresh parameters
+> stop mgr
+> start mgr
+> info mgr detail
+
+gdat8140 
+--------------------------------------------
+-- Use Wallet facility
+Create Wallet
+Add CredentialStore
+Alter CredentialStore Add User c##ogguser@8140cdb Password abc123 Alias ogg_user_8140_cdb
+Alter CredentialStore Add User c##ogguser@8141cdb Password abc123 Alias ogg_user_8141_cdb
+Alter CredentialStore Add User c##ogguser@8140pdb Password abc123 Alias ogg_user_8140_pdb
+Alter CredentialStore Add User c##ogguser@8141pdb Password abc123 Alias ogg_user_8141_pdb
+Info CredentialStore
+
+-- Test db login
+DBLogin UserIDAlias ogg_user_8140_cdb
+DBLogin UserIDAlias ogg_user_8140_pdb
+DBLogin UserIDAlias ogg_user_8141_cdb
+DBLogin UserIDAlias ogg_user_8141_pdb
+ 
+
+gdat8140 and gdat8141
+------------------------------------------------------------------
+copy the wallet and credential files from GGSCI_SRC to GGSCI_TRG.
+
+[oracle@host01 ogg_trg]$  cp /u01/app/oracle/product/ogg_src/dircrd/* ./dircrd         
+[oracle@host01 ogg_trg]$  ls ./dircrd
+cwallet.sso
+[oracle@host01 ogg_trg]$  cp /u01/app/oracle/product/ogg_src/dirwlt/* ./dirwlt
+[oracle@host01 ogg_trg]$  ls ./dirwlt
+cwallet.sso
+
+
+gdat8141
+--------------------------------------------
+-- Test db login
+DBLogin UserIDAlias ogg_user_8140_cdb
+DBLogin UserIDAlias ogg_user_8140_pdb
+DBLogin UserIDAlias ogg_user_8141_cdb
+DBLogin UserIDAlias ogg_user_8141_pdb
+
+
+gdat8140 
+--------------------------------------------
+-- Enable supplemental logging on the source database for the specified tables
+DBLogin UserIDAlias ogg_user_8140_pdb 
+add schematrandata pdb1.scapp  
+info schematrandata pdb1.scapp
+
+
+gdat8140 
+------------------------------------
+-- Create primary integrated extract on source schema
+edit param einta
+
+Extract einta
+UserIdAlias ogg_user_8140_cdb
+TRANLOGOPTIONS EXCLUDETAG 0935
+TranlogOptions IntegratedParams (max_sga_size 256)
+Exttrail ./dirdat/in
+DDL EXCLUDE ALL
+DDLOPTIONS REPORT
+LOGALLSUPCOLS
+UPDATERECORDFORMAT COMPACT
+Table PDB1.SCAPP.*;             
+
+
+
+-- Register and create primary integrated extract on source schema
+dblogin useridalias ogg_user_8140_cdb 
+register extract einta database container(pdb1)
+add extract einta, integrated tranlog, begin now 
+add exttrail ./dirdat/in, extract einta, megabytes 10  
+
+
+-- Configure data pump. Should be no need to have "UserIdAlias ogg_user_8140_cdb" in the param pinta
+edit param pinta
+
+Extract  pinta
+UserIdAlias ogg_user_8140_cdb
+rmthost gdat8141, mgrport 7809
+rmttrail ./dirdat/pn
+table pdb1.scapp.*;
+
+-- Create the data pump group and the remote Extract trail file.
+add extract pinta, exttrailsource ./dirdat/in 
+add rmttrail ./dirdat/pn, extract pinta, megabytes 10
+
+
+-- Starting the Primary Extract and the Data Pump Processes
+start Extract einta 
+start extract pinta
+Info All 
+ 
+
+gdat8141 
+------------------------------------
+config the replicat process
+
+>Edit Param rinta                                                            
+
+Replicat rinta
+ASSUMETARGETDEFS
+DiscardFile ./dirrpt/rpdw.dsc, Purge
+DBOPTIONS SETTAG 0935
+DDLOPTIONS REPORT
+DBOPTIONS INTEGRATEDPARAMS(parallelism 6)
+UserIdAlias ogg_user_8141_pdb
+Map pdb1.scapp.*, target pdb.scapp.*;
+
+
+DBlogin UserIdAlias ogg_user_8141_pdb
+Add Replicat rinta, Integrated,  exttrail ./dirdat/pn                        
+Start Replicat rinta
+info all
+Info rinta 
+Info rinta, detail
+ 
+At this point, the replication from 8140 to 8141 is done. The next is to setup the other direction.
+ 
+gdat8141 
+--------------------------------------------
+---- Enable supplemental logging on the source database for the specified tables
+DBLogin UserIDAlias ogg_user_8141_pdb 
+add schematrandata pdb.scapp  
+info schematrandata pdb.scapp
+
+> edit param einta 
+Extract einta
+UserIdAlias ogg_user_8141_cdb
+TRANLOGOPTIONS EXCLUDETAG 0935
+TranlogOptions IntegratedParams (max_sga_size 256)
+Exttrail ./dirdat/in
+DDL EXCLUDE ALL
+DDLOPTIONS REPORT
+LOGALLSUPCOLS
+UPDATERECORDFORMAT COMPACT
+Table PDB.SCAPP.*;             
+
+---- register extract einta to pdb and create the extract
+dblogin useridalias ogg_user_8141_cdb 
+register extract einta database container(pdb)
+add extract einta, integrated tranlog, begin now 
+add exttrail ./dirdat/in, extract einta, megabytes 10  
+
+---- edit param pinta 
+Extract  pinta
+UserIdAlias ogg_user_8141_cdb
+rmthost gdat8140, mgrport 7809
+rmttrail ./dirdat/pn
+table pdb.scapp.*;
+
+----- add data pump
+add extract pinta, exttrailsource ./dirdat/in 
+add rmttrail ./dirdat/pn, extract pinta, megabytes 10
+
+
+---- Starting the Primary Extract and the Data Pump Processes
+start Extract einta 
+start extract pinta
+Info All 
+
+gdat8140 
+--------------------------------------------
+---- setup the replicat
+
+-- edit param rinta
+Replicat rinta
+ASSUMETARGETDEFS
+DiscardFile ./dirrpt/rpdw.dsc, Purge
+DDLOPTIONS REPORT
+DBOPTIONS SETTAG 0935
+DBOPTIONS INTEGRATEDPARAMS(parallelism 6)
+UserIdAlias ogg_user_8140_pdb
+Map pdb.scapp.*, target pdb1.scapp.*;
+
+-- add the replicat
+DBlogin UserIdAlias ogg_user_8140_pdb
+Add Replicat rinta, Integrated,  exttrail ./dirdat/pn                        
+Start Replicat rinta
+info all
+Info rinta 
+Info rinta, detail
+
+
+At this point, the replication from 8141 to 8140 is done. So, bidirectional replication is done.
+
+
+ 
+gdat8140, gdat8141
+------------------------------------
+Generate insert to test. Login as scapp in gdat8140 to run below insert sql
+@<OGG_INSTLL_DIR>/demo_ora_insert.sql
+
+-- Check stats in extract
+Stats einta 
+Stats pinta
+
+-- Check data replicated to gdat8141. Login as scapp in gdat8141 to check. There should be 235 rows returned.
+select count(*) from scapp.tcustmer;
+select count(*) from scapp.tcustord;
+
+-- Check stats in replicat
+Stats rinta
+
+Cleanup the environments(if needed)
+-- delete the replicat in gdat8141
+DBlogin UserIdAlias ogg_user_8141_pdb 
+stop rinta
+pause 10
+delete Replicat rinta
+
+-- delete the pump and extract in gdat8140
+dblogin useridalias ogg_user_8140_cdb 
+stop pinta
+pause 10
+delete rmttrail ./dirdat/pn
+delete extract pinta 
+stop extract einta
+pause 10
+delete exttrail ./dirdat/in  
+delete extract einta 
+unregister extract einta database
+
+-- Disable supplemental logging on the source database for the specified tables in gdat8140
+DBLogin UserIDAlias ogg_user_8140_pdb 
+delete schematrandata scapp
+Info schematrandata scapp
+
+-- delete the wallet in gdat8140
+delete CredentialStore
+pause 10
+PURGE WALLET
+info CredentialStore
+
+-- drop user in gdat8141 pdb
+drop user scapp cascade;
+
+-- drop user in gdat8141 cdb, need to exit ggsci first
+drop user C##OGGUSER cascade ;
+
+-- drop user in gdat8140 pdb
+drop user scapp cascade;
+
+-- drop user in gdat8140 cdb, need to exit ggsci first
+drop user C##OGGUSER cascade ;
+
+-- drop tablespace in gdat8141 pdb
+drop TABLESPACE scapp including contents and datafiles;
+
+-- drop tablespace in gdat8140 pdb
+drop TABLESPACE scapp including contents and datafiles;
+
+
+############################################################################################################
+# Test CPU patch in gdat8140 and gdat8141
+############################################################################################################
+It is assumed that gdat8140 is the active and gdat8141 is the standby, although bidirectional was setup.
+Refer to OGG_cpujan2016.xls for action log
+
+1. apply the cpu patch to gdat8141 first.
+a. stop all OGG processes(extract/replicat/mgr) in gdat8141. Stop the pump process in gdat8140.
+   In 8140
+     stop pinta
+   In 8141	
+     stop ER *
+     stop mgr !
+b. if there are any transaction in gdat8140, it should resume after the cpu patch. Test it.
+c. apply cpu patch to oracle database.
+d. insert a testing record in gdat8140 and query it after gdat8141 cpu patch and make sure it can be replicated to gdat8141.
+   insert into scapp.syslog values(systimestamp,'gdat8140 testing Txn during gdat8141 cpu patch');
+d. startup all OGG processes(extract/replicat/mgr) in gdat8141. Start the pump process in gdat8140.
+   In 8141	
+     start mgr
+     start ER *
+   In 8140
+     start pinta
+e. check that any transaction applied to gdat8140 during the cpu patch of gdat8141 is replicated to gdat8141.
+   Run below command in gdat8141 to check testing record in 1d can be replicated to gdat8141.
+   SEND REPLICAT <group> LOGEND
+   select * from scapp.syslog where remark='gdat8140 testing Txn during gdat8141 cpu patch';
+f. At this point, gdat8141 cpu patch is done and replication is working normally.
+
+2. apply the cpu patch to gdat8140
+a. stop application access to gdat8140 database
+   alter user <applogin> account lock;
+   kill all existing <applogin> sessions
+b. allow extract to finish capturing the transaction data that remains in the transaction log. Issue this command until "Yes" returned.
+   send extract <group> logend
+c. allow application access to gdat8141 database
+   alter user <applogin> account unlock;
+d. direct traffic in local load balancer from gdat8140 to gdat8141
+   Notes: There is application downtime in switching steps 2a-2d. Should be less than 15 minutes.
+e. insert a testing record in gdat8141 and query it and make sure it can be replicated to gdat8140.
+   insert into scapp.syslog values(systimestamp,'gdat8141 testing Txn before gdat8140 cpu patch');
+f. Make sure the testing record can be replicated to gdat8140 before cpu patch in gdat8140 
+   select * from scapp.syslog where remark='gdat8141 testing Txn before gdat8140 cpu patch';
+g. stop all OGG processes(extract/replicat/mgr) in gdat8140. Stop pump process in gdat8141.
+   In gdat8141
+     stop pinta
+   In gdat8140
+     stop ER *
+     stop mgr !
+h. if there are any transaction in gdat8141, it should resume after the cpu patch. Test it.
+i. apply cpu patch to oracle database gdat8140.
+j. insert a testing record in gdat8141 and query it after gdat8140 cpu patch and make sure it can be replicated to gdat8140.
+   insert into scapp.syslog values(systimestamp,'gdat8141 testing Txn during gdat8140 cpu patch');
+k. startup all OGG processes(extract/replicat/mgr) in gdat8140. Start pump process in gdat8141.
+   In gdat8140
+     start mgr
+     start ER *
+   In gdat8141
+     start pinta
+l. check that any transaction applied to gdat8141 during the cpu patch of gdat8140 is replicated to gdat8140.
+   Run below command in gdat8140 to check testing record in 1d can be replicated to gdat8141.
+   SEND REPLICAT <group> LOGEND
+   select * from scapp.syslog where remark='gdat8141 testing Txn during gdat8140 cpu patch';
+m. Cleanup the testing transaction in gdat8141. It will replicate to gdat8140 also.
+   delete scapp.syslog where remark like '%testing Txn%';
+   commit;
+n. Make sure they are deleted in gdat8140. There should return no rows for below query.
+   select * from scapp.syslog where remark like '%testing Txn%';
+
+3. At this point, both gdat8140 and gdat8141 has been cpu patched. gdat8141 is now the active database and replication is working.   
+   To avoid service interruption, switching back to gdat8140 is not recommended until next time maintenance.
+
+   
+############################################################################################################
+# Test sequence replication
+############################################################################################################
+-- In gdat8140, create sequence starting with 1XXX.....
+CREATE SEQUENCE SCAPP.SEQ_TBL_MAIL_LIST_ID INCREMENT BY 1 MAXVALUE 1999999999999999999999999999 MINVALUE 1000000000000000000000000000 CACHE 20
+   
+  CREATE TABLE SCAPP.TBL_MAIL_LIST 
+   (	ID NUMBER DEFAULT SEQ_TBL_MAIL_LIST_ID.NEXTVAL, 
+	STREETCTR_ID VARCHAR2(20 BYTE) NOT NULL ENABLE, 
+	EMAIL VARCHAR2(50 BYTE) NOT NULL ENABLE, 
+	LASTUPDATED_TIME TIMESTAMP (6) NOT NULL ENABLE, 
+	 CONSTRAINT TBL_MAIL_LIST_PK PRIMARY KEY (ID)
+   );
+
+-- In gdat8141, create sequence starting with 2XXX.....
+CREATE SEQUENCE SCAPP.SEQ_TBL_MAIL_LIST_ID INCREMENT BY 1 MAXVALUE 2999999999999999999999999999 MINVALUE 2000000000000000000000000000 CACHE 20
+
+  CREATE TABLE SCAPP.TBL_MAIL_LIST 
+   (	ID NUMBER DEFAULT SEQ_TBL_MAIL_LIST_ID.NEXTVAL, 
+	STREETCTR_ID VARCHAR2(20 BYTE) NOT NULL ENABLE, 
+	EMAIL VARCHAR2(50 BYTE) NOT NULL ENABLE, 
+	LASTUPDATED_TIME TIMESTAMP (6) NOT NULL ENABLE, 
+	 CONSTRAINT TBL_MAIL_LIST_PK PRIMARY KEY (ID)
+   ) ;
+  
+-- In gdat8140,
+insert into scapp.TBL_MAIL_LIST(streetctr_id,email,lastupdated_time) values('SC_1','test@gmail.com',sysdate);
+commit;
+
+-- In gdat8141,
+insert into scapp.TBL_MAIL_LIST(streetctr_id,email,lastupdated_time) values('SC_2','test2@gmail.com',sysdate);
+commit;
+
+-- gdat8140, gdat8141
+select * from scapp.TBL_MAIL_LIST;
+
+
+############################################################################################################
+# Test whether esri st_geometry data type can be replicated
+############################################################################################################
+-- In gdat8140 pdb1
+CREATE TABLESPACE SDE
+DATAFILE 'D:\ORADATA\CDB12C\PDB1\SDE01.DBF' SIZE 419430400 REUSE
+EXTENT MANAGEMENT LOCAL
+AUTOALLOCATE
+ONLINE;
+
+create user SDE
+identified by abc123
+default tablespace SDE
+temporary tablespace TEMP
+account unlock ;
+
+grant CONNECT to sde ;
+grant RESOURCE to sde ;
+
+
+-- In gdat8141 pdb
+CREATE TABLESPACE SDE
+DATAFILE 'D:\ORADATA1\CDB12C\PDB\SDE01.DBF' SIZE 419430400 REUSE
+EXTENT MANAGEMENT LOCAL
+AUTOALLOCATE
+ONLINE;
+
+create user SDE
+identified by abc123
+default tablespace SDE
+temporary tablespace TEMP
+account unlock ;
+
+grant CONNECT to sde ;
+grant RESOURCE to sde ;
+
+
+- In gdat8141, use arcpy to create the geodatabase. gdat8141 has ArcGIS desktop 10.2.2 installed.
+D:\download\setup_geodatabase>geodb8140.py
+Installing St_Geometry ....
+Successfully installed St_Geometry.
+
+D:\download\setup_geodatabase>geodb8141.py
+Installing St_Geometry ....
+Successfully installed St_Geometry.
+
+- gdat8140, gdat8141
+grant SELECT_CATALOG_ROLE to scapp ;
+
+- gdat8140, gdat8141 
+In ArcCatalog, create a test layer, POLYTEST(objectid, shape) under SCAPP with no data in both 8140 and 8141
+In ArcMap, create a FGDB having the same layer, and add some data to it
+Load data to gdat8140 POLYTEST layer using the corresponding layer from the FGDB
+Check that the gdat8140 POLYTEST layer can be replicated to gdat8141
+
+Notes
+- S[n]_IDX$ table was implicitly created when POLYTEST was created. Also, some indexes and sequence are also implicitly created. 
+- Very surprised that the S[n]_IDX$ table is not captured by OGG although table wildcard SCAPP.* was specified in extract parameter file. For safety, better don't use table wildcard in paramter files.
+- When dropping the table with "drop table polytest purge" in sqlplus, the corresponding S[n]_IDX$ was also dropped automatically. Seems an underlying mechanism there.
+
+Conclusion: Preliminary test shows it is supported.
+
+############################################################################################################
+# Re-sync data
+############################################################################################################
+This is required when the standby database(8141) was found out of sync with the active database and
+there is no easy way to identify what are the missing records. It assumes that the data in the active 
+database are correct and tables have been created in the standby database 8141 and all records truncated.
+
+-- Get the current scn from the active database 8140
+select flashback_scn from v$database;
+
+-- Export the dump upto the scn
+exp system@pdb12c flashback_scn=<scn> file=scapp.dmp 
+
+...
+
+############################################################################################################
+# Monitoring and support issue in cloud
+############################################################################################################
+
+
+  
+############################################################################################################
+# FAQ
+############################################################################################################
+How to startup OGG on server startup?
+
+Use the <ogg_install_dir>/install to create a windows service for OGG mgr. Type "install" and it will
+show the syntax.
+eg. install addservice waitforservice <oralce12cService>
+It creates the "GGSMGR" service with automatic startup option.
+-------------------------------------------------------------------------------------------------------------
+How to startup extract/pump/replicat processes on startup?
+
+Use the mgr parameter files to control the startup of them.
+-------------------------------------------------------------------------------------------------------------
+How to stop DML to source schema?
+
+This is required before switching active database such as for cpu patching.
+1. alter user <app_login> account lock;
+2. alter system kill session '<SID>,<SERIAL#>' immediate ; -- or wait for active txn finished first. Idle txn can be killed.
+
+-------------------------------------------------------------------------------------------------------------
+How to suppress asking confirmation on ogg command?
+
+GGSCI (myhost) >  Stop mgr !
+-------------------------------------------------------------------------------------------------------------
+How to prevent looping in bidirectional replication
+
+In bidirectional replication, how to prevent capture of replicat transactions to avoid looping
+Inside the Replicat parameter file of both OGGs, add below line
+DBOPTIONS SETTAG 0935
+
+Inside the Extract parameter file of both OGGs, add below line
+TRANLOGOPTIONS EXCLUDETAG 0935
+
+If you are excluding multiple tags, each must have a separate TRANLOGOPTIONS EXCLUDETAG statement specified.
+
+Reference
+OracleR GoldenGate Administering Oracle GoldenGate for Windows and UNIX
+ Configuring Oracle GoldenGate for Active-Active High Availability
+  Preventing the Capture of Replicat Operations
+https://docs.oracle.com/goldengate/1212/gg-winux/GWUAD/wu_bidirectional.htm#GWUAD302
+
+-------------------------------------------------------------------------------------------------------------
+How to disable DDL replication?
+
+Be default, in OGG 12c, DDL is enabled. To disable it, add below line in extract parameter file
+DDL EXCLUDE ALL
+
+Reference
+OracleR GoldenGate Reference for Oracle GoldenGate for Windows and UNIX
+ DDL
+https://docs.oracle.com/goldengate/1212/gg-winux/GWURF/gg_parameters035.htm#GWURF443
+-------------------------------------------------------------------------------------------------------------
+How to perform application schema change if DDL is disabled?
+
+To apply a patch manually on the source and target
+
+Stop access to the source database.
+
+Allow Extract to finish capturing the transaction data that remains in the transaction log. To determine when Extract is finished, 
+issue the following command in GGSCI until it returns At EOF.
+
+SEND EXTRACT group GETLAG
+Stop Extract.
+
+STOP EXTRACT group
+Start applying the patch on the source.
+
+Wait until the data pump (if used) and Replicat are finished processing the data in their respective trails. 
+To determine when they are finished, use the following commands until they return At EOF.
+
+SEND EXTRACT group GETLAG
+SEND REPLICAT group GETLAG
+Stop the data pump and Replicat.
+
+STOP EXTRACT group
+STOP REPLICAT group
+At this point, the data in the source and target should be identical, because all of the replicated transactional changes from 
+the source have been applied to the target.
+
+Apply the patch on the target.
+
+If the patches changed table definitions, run DEFGEN for the source tables to generate updated source definitions, 
+and then replace the old definitions with the new ones in the existing source definitions file on the target system.
+
+Start the Oracle GoldenGate processes whenever you are ready to begin capturing user activity again.
+
+
+Reference 
+Fusion Middleware Administering Oracle GoldenGate for Windows and UNIX
+20 Performing Administrative Operations
+https://docs.oracle.com/goldengate/c1221/gg-winux/GWUAD/wu_adminops.htm#GWUAD698
+-------------------------------------------------------------------------------------------------------------
+How to check lag of extract and replicat?
+
+GGSCI (gdat8140 as c##ogguser@cdb12c/CDB$ROOT) 139> send extract einta getlag
+Sending GETLAG request to EXTRACT EINTA ...
+Last record lag 2 seconds.
+
+
+GGSCI (gdat8140 as c##ogguser@cdb12c/CDB$ROOT) 140> send extract pinta getlag
+Sending GETLAG request to EXTRACT PINTA ...
+Last record lag 4 seconds.
+At EOF, no more records to process.
+
+
+GGSCI (gdat8140 as c##ogguser@cdb12c/CDB$ROOT) 141> send replicat rinta getlag
+Sending GETLAG request to REPLICAT RINTA ...
+Last record lag 701 seconds.
+Low watermark lag: 1,755.
+High watermark lag: 705.
+Low watermark position: 7759245.
+High watermark position: 7760471.
+At EOF, no more records to process.
+
+-------------------------------------------------------------------------------------------------------------
+How to check extract and replicat has finished processing ?
+
+Need to stop application operation that will generate replicate data first. Then 
+use "send extract", "send replicat" and "stats" commands to check...
+
+
+GGSCI (gdat8140 as c##ogguser@cdb12c/CDB$ROOT) 142> send extract einta logend
+Sending LOGEND request to EXTRACT EINTA ...
+NO.
+
+GGSCI (gdat8140 as c##ogguser@cdb12c/CDB$ROOT) 143> send extract pinta logend
+Sending LOGEND request to EXTRACT PINTA ...
+YES.
+
+GGSCI (gdat8140 as c##ogguser@cdb12c/CDB$ROOT) 144> send replicat rinta logend
+Sending LOGEND request to REPLICAT RINTA ...
+YES.
+
+Comments: The "send extract einta logend" always return "NO", maybe should look at the pinta instead.
+
+GGSCI (gdat8140 as c##ogguser@cdb12c/CDB$ROOT) 157> stats einta latest
+Sending STATS request to EXTRACT EINTA ...
+Start of Statistics at 2016-03-03 09:48:29.
+DDL replication statistics (for all trails):
+*** Total statistics since extract started     ***
+        Operations                                       303.00
+        Mapped operations                                  0.00
+        Unmapped operations                              276.00
+        Other operations                                  27.00
+        Excluded operations                              303.00
+Output to ./dirdat/in:
+
+Extracting from PDB1.SCAPP.SYSLOG to PDB1.SCAPP.SYSLOG:
+*** Latest statistics since 2016-03-02 18:07:45 ***
+        Total inserts                                      1.00
+        Total updates                                      0.00
+        Total deletes                                      0.00
+        Total discards                                     0.00
+        Total operations                                   1.00
+End of Statistics.
+
+
+GGSCI (gdat8140 as c##ogguser@cdb12c/CDB$ROOT) 158> stats einta reset
+Sending STATS request to EXTRACT EINTA ...
+DDL replication statistics (for all trails):
+*** Total statistics since extract started     ***
+        Operations                                       303.00
+        Mapped operations                                  0.00
+        Unmapped operations                              276.00
+        Other operations                                  27.00
+        Excluded operations                              303.00
+Successfully reset statistics.
+
+
+GGSCI (gdat8140 as c##ogguser@cdb12c/CDB$ROOT) 159> stats einta latest
+Sending STATS request to EXTRACT EINTA ...
+Start of Statistics at 2016-03-03 09:50:06.
+DDL replication statistics (for all trails):
+*** Total statistics since extract started     ***
+        Operations                                       303.00
+        Mapped operations                                  0.00
+        Unmapped operations                              276.00
+        Other operations                                  27.00
+        Excluded operations                              303.00
+
+Output to ./dirdat/in:
+Extracting from PDB1.SCAPP.SYSLOG to PDB1.SCAPP.SYSLOG:
+*** Latest statistics since 2016-03-03 09:49:54 ***
+        No database operations have been performed.
+End of Statistics.
+
+
+GGSCI (gdat8140 as c##ogguser@cdb12c/CDB$ROOT) 162> stats pinta latest
+Sending STATS request to EXTRACT PINTA ...
+Start of Statistics at 2016-03-03 10:05:52.
+Output to ./dirdat/pn:
+Extracting from PDB1.SCAPP.SYSLOG to PDB1.SCAPP.SYSLOG:
+*** Latest statistics since 2016-03-02 18:07:49 ***
+        Total inserts                                      1.00
+        Total updates                                      0.00
+        Total deletes                                      0.00
+        Total discards                                     0.00
+        Total operations                                   1.00
+End of Statistics.
+
+GGSCI (gdat8140 as c##ogguser@cdb12c/CDB$ROOT) 163> stats pinta reset
+Sending STATS request to EXTRACT PINTA ...
+Successfully reset statistics.
+
+GGSCI (gdat8140 as c##ogguser@cdb12c/CDB$ROOT) 164> stats pinta latest
+Sending STATS request to EXTRACT PINTA ...
+Start of Statistics at 2016-03-03 10:06:18.
+Output to ./dirdat/pn:
+Extracting from PDB1.SCAPP.SYSLOG to PDB1.SCAPP.SYSLOG:
+*** Latest statistics since 2016-03-03 10:06:12 ***
+
+        No database operations have been performed.
+
+End of Statistics.
+
+Comments: Use "reset" and then "latest" if want to see current statistics.
+
+############################################################################################################
+# Errors
+############################################################################################################
+Problem: 
+ADD schematrandata not worked, but ADD trandata okay.
+
+Solution: 
+Seems an error in OGG 12.1.2, it is okay in 12.1.2.1 version
+-------------------------------------------------------------------------------------------------------------
+Problem: 
+data pump has below error on startup
+2016-02-15 18:00:13  ERROR   OGG-02137  The data pump requires a DDL history table. None found.
+
+Solution: 
+make sure no 
+"DDL INCLUDE MAPPED
+DDLOPTIONS REPORT"
+in the data pump parameter file
+-------------------------------------------------------------------------------------------------------------
+Problem: 
+After applying JULCPU2015 to 8140 and startup the OGG, it has below error in RINTA log. However, there is no error in 8141.
+Patch was applied to 8141 first and then 8140.
+
+2016-02-29 08:30:29  ERROR   OGG-01091  Unable to open file "./dirdat/pn000014" (error 2, The system cannot find the fil
+e specified.).
+
+The RINTA process status becomes ABENDED. Some txn are applied to 8141 during 8140 patching, so they cannot be replicated to 8140 
+because RINTA is ABENDED.
+
+Solution: 
+Can't understand why rinta looking for an non-exist pump file(pn000014). The available pump files are 
+pn00001,...,pn000013,pn000020.
+
+pn000020 is the file containing the data to be replicated. This can be verified by using the logdump utility.
+
+./logdump
+open ./dirdat/pn000020
+Logdump 23 >filter inc filename PDB.SCAPP.SYSLOG
+Logdump 24 >pos eof
+Reading in reverse from RBA 2460
+Logdump 25 >pos rev
+Reading in reverse from RBA 2460
+Logdump 26 >n
+
+2016/02/26 17:55:25.666.000 Insert               Len    80 RBA 2285
+Name: PDB.SCAPP.SYSLOG
+After  Image:                                             Partition 4   G  e
+ 0000 0015 0000 3230 3136 2d30 322d 3236 3a31 373a | ......2016-02-26:17:
+ 3535 3a32 3700 0100 3300 0000 2f67 6461 7438 3134 | 55:27...3.../gdat814
+ 3120 7465 7374 696e 6720 5478 6e34 2064 7572 696e | 1 testing Txn4 durin
+ 6720 6764 6174 3831 3430 2063 7075 2070 6174 6368 | g gdat8140 cpu patch
+Column     0 (x0000), Len    21 (x0015)
+Column     1 (x0001), Len    51 (x0033)
+
+Logdump 27 >n
+
+2016/02/26 17:55:25.666.000 Insert               Len    80 RBA 2110
+Name: PDB.SCAPP.SYSLOG
+After  Image:                                             Partition 4   G  m
+ 0000 0015 0000 3230 3136 2d30 322d 3236 3a31 373a | ......2016-02-26:17:
+ 3535 3a32 3400 0100 3300 0000 2f67 6461 7438 3134 | 55:24...3.../gdat814
+ 3120 7465 7374 696e 6720 5478 6e33 2064 7572 696e | 1 testing Txn3 durin
+ 6720 6764 6174 3831 3430 2063 7075 2070 6174 6368 | g gdat8140 cpu patch
+Column     0 (x0000), Len    21 (x0015)
+Column     1 (x0001), Len    51 (x0033)
+
+Logdump 28 >n
+
+2016/02/26 17:55:25.666.000 Insert               Len    80 RBA 1935
+Name: PDB.SCAPP.SYSLOG
+After  Image:                                             Partition 4   G  m
+ 0000 0015 0000 3230 3136 2d30 322d 3236 3a31 373a | ......2016-02-26:17:
+ 3535 3a32 3100 0100 3300 0000 2f67 6461 7438 3134 | 55:21...3.../gdat814
+ 3120 7465 7374 696e 6720 5478 6e32 2064 7572 696e | 1 testing Txn2 durin
+ 6720 6764 6174 3831 3430 2063 7075 2070 6174 6368 | g gdat8140 cpu patch
+Column     0 (x0000), Len    21 (x0015)
+Column     1 (x0001), Len    51 (x0033)
+
+Logdump 29 >n
+
+2016/02/26 17:55:25.666.000 Insert               Len    79 RBA 1731
+Name: PDB.SCAPP.SYSLOG
+After  Image:                                             Partition 4   G  b
+ 0000 0015 0000 3230 3136 2d30 322d 3236 3a31 373a | ......2016-02-26:17:
+ 3535 3a31 3800 0100 3200 0000 2e67 6461 7438 3134 | 55:18...2....gdat814
+ 3120 7465 7374 696e 6720 5478 6e20 6475 7269 6e67 | 1 testing Txn during
+ 2067 6461 7438 3134 3020 6370 7520 7061 7463 68   |  gdat8140 cpu patch
+Column     0 (x0000), Len    21 (x0015)
+Column     1 (x0001), Len    50 (x0032)
+
+Logdump 30 >n
+
+2016/02/26 17:04:31.653.000 Insert               Len    79 RBA 1523
+Name: PDB.SCAPP.SYSLOG
+After  Image:                                             Partition 4   G  s
+ 0000 0015 0000 3230 3136 2d30 322d 3236 3a31 373a | ......2016-02-26:17:
+ 3034 3a33 3300 0100 3200 0000 2e67 6461 7438 3134 | 04:33...2....gdat814
+ 3120 7465 7374 696e 6720 5478 6e20 6265 666f 7265 | 1 testing Txn before
+ 2067 6461 7438 3134 3020 6370 7520 7061 7463 68   |  gdat8140 cpu patch
+Column     0 (x0000), Len    21 (x0015)
+Column     1 (x0001), Len    50 (x0032)
+
+Logdump 31 >n
+
+Filtering suppressed      2 records
+Logdump 32 >
+
+These are the missing transaction in 8140, 
+26-02-2016 17:55:18 gdat8141 testing Txn during gdat8140 cpu patch
+26-02-2016 17:55:21 gdat8141 testing Txn2 during gdat8140 cpu patch
+26-02-2016 17:55:24 gdat8141 testing Txn3 during gdat8140 cpu patch
+26-02-2016 17:55:27 gdat8141 testing Txn4 during gdat8140 cpu patch
+
+So resume the rinta from RBA 1731 as follows
+alter rinta, extseqno 20, extrba 1731
+start rinta
+
+
+However, rinta is not function well because the "time since chkpt" keeps on increasing. Also, it cannot be stopped.
+GGSCI (gdat8140) 73>  info all
+Program     Status      Group       Lag at Chkpt  Time Since Chkpt
+MANAGER     RUNNING
+EXTRACT     RUNNING     EINTA       00:00:10      00:00:07
+EXTRACT     RUNNING     PINTA       00:00:00      00:00:03
+REPLICAT    RUNNING     RINTA       00:00:00      00:12:20
+
+GGSCI (gdat8140) 74> stop rinta
+Sending STOP request to REPLICAT RINTA ...
+ERROR: sending message to REPLICAT RINTA (Timeout waiting for message).
+
+So, finally, need to kill it and then start it again. The "Time Since Chkpt" becomes normal again.
+
+GGSCI (gdat8140) 80> kill replicat rinta
+Sending KILL request to MANAGER ('GGSMGR') ...
+Killed process (3516) for REPLICAT RINTA
+GGSCI (gdat8140) 81> info all
+Program     Status      Group       Lag at Chkpt  Time Since Chkpt
+MANAGER     RUNNING
+EXTRACT     RUNNING     EINTA       00:00:10      00:00:08
+EXTRACT     RUNNING     PINTA       00:00:00      00:00:04
+REPLICAT    ABENDED     RINTA       00:00:00      00:18:23
+
+GGSCI (gdat8140) 80> start replicat rinta
+
+GGSCI (gdat8140) 103>       info all
+Program     Status      Group       Lag at Chkpt  Time Since Chkpt
+MANAGER     RUNNING
+EXTRACT     RUNNING     EINTA       00:00:09      00:00:00
+EXTRACT     RUNNING     PINTA       00:00:00      00:00:08
+REPLICAT    RUNNING     RINTA       00:00:00      00:00:04
+
+-------------------------------------------------------------------------------------------------------------
+Problem: 
+After applying OCTCPU2015 to 8140 and startup the OGG, the applied testing txn in gdat8141 during gdat8140 patching cannot be replicated.
+In the rinta of 8140, it found that rinta is reading an old pump file, pn000021. Instead it should read the update one pn000024.
+Don't know why it is and also why there is gap between. However, there is no such problem in 8141. Patch was applied to 8141 first and then 8140.
+
+Opened trail file ./dirdat/pn000020 at 2016-03-02 16:30:13
+2016-03-02 16:30:13  INFO    OGG-03522  Setting session time zone to source database time zone '+08:00'.
+2016-03-02 16:30:13  INFO    OGG-03506  The source database character set, as determined from the trail file, is UTF-8.
+Switching to next trail file ./dirdat/pn000021 at 2016-03-02 16:30:14 due to EOF, with current RBA 2625
+Opened trail file ./dirdat/pn000021 at 2016-03-02 16:30:14
+2016-03-02 16:30:30  INFO    OGG-01021  Command received from GGSCI: GETLAG.
+2016-03-02 16:33:00  INFO    OGG-01971  The previous message, 'INFO OGG-01021', repeated 2 times.
+
+Solution:
+stop replicat rinta
+alter replicat rinta extseqno 24 extrba 0
+start rinta
+
+-------------------------------------------------------------------------------------------------------------
+Problem: 
+8140 rinta startup with below error
+
+2016-02-29 17:22:18  ERROR   OGG-02546  Database is open in restricted mode. Unable to attach to database inbound server OGG$RINTA.
+2016-02-29 17:22:18  ERROR   OGG-01668  PROCESS ABENDING.
+
+Solution: 
+The database is found in restricted mode, maybe 8140 was patched cpujul2015 manually and it did not disable the restricted mode afterward. 
+SYS@PDB12C > @db
+Connect: SYS \ cdb12c \ GDAT8140 \ 12.1.0.1.0
+Uptime : 0days 0hours 1minutes
+
+      DBID NAME                 CREATED             STATUS     LOGINS     LOG_MODE                 ARCHIVER
+---------- -------------------- ------------------- ---------- ---------- ------------------------ --------------
+4019125938 CDB12C               11-07-2013 16:14:42 OPEN       RESTRICTED ARCHIVELOG               STARTED
+
+
+After re-run the cpujul2015 with datapatch -verbose, the restricted mode was found disabled afterward.
+
+-------------------------------------------------------------------------------------------------------------
+
+C:\app\gsadmin\product\12.1.0\dbhome_1\OPatch>datapatch -verbose
+SQL Patching tool version 12.1.0.1.0 on Fri Feb 26 16:23:25 2016
+Copyright (c) 2014, Oracle.  All rights reserved.
+
+Connecting to database...OK
+Determining current state...
+Currently installed SQL Patches:
+  PDB CDB$ROOT:
+  PDB PDB$SEED:
+  PDB PDB:
+Currently installed C Patches: 21076681
+Adding patches to installation queue and performing prereq checks...
+Installation queue:
+  For the following PDBs: CDB$ROOT PDB$SEED PDB
+    Nothing to roll back
+    The following patches will be applied: 21076681
+Installing patches...
+Patch installation complete.  Total patches installed: 1
+Validating logfiles...
+DBD::Oracle::st execute failed: ORA-00603: ORACLE server session terminated by fatal error
+ORA-00372: file 5 cannot be modified at this time
+ORA-01110: data file 5: 'D:\ORADATA1\CDB12C\UNDOTBS01.DBF'
+ORA-00372: file 5 cannot be modified at this time
+ORA-01110: data file 5: 'D:\ORADATA1\CDB12C\UNDOTBS01.DBF'
+Process ID: 1644
+Session ID: 173 Serial number: 257 (DBD ERROR: OCIStmtExecute) [for Statement "ALTER PLUGGABLE DATABASE pdb$seed
+               CLOSE IMMEDIATE INSTANCES=ALL"] at C:\app\gsadmin\product\12.1.0\dbhome_1\\sqlpatch/sqlpatch.pm line 836,
+ <LOGFILE> line 157674.
+C:\app\gsadmin\product\12.1.0\dbhome_1\OPatch>
+
+
+
+alter session set "_oracle_script"=TRUE;
+ALTER PLUGGABLE DATABASE pdb$seed open read write;
+
+
+SQL> alter session set "_oracle_script"=TRUE;
+
+Session altered.
+
+SQL> ALTER PLUGGABLE DATABASE pdb$seed open read write;
+
+Pluggable database altered.
+
+SQL> exit
+Disconnected from Oracle Database 12c Enterprise Edition Release 12.1.0.1.0 - 64bit Production
+With the Partitioning, OLAP, Advanced Analytics and Real Application Testing options
+
+C:\app\gsadmin\product\12.1.0\dbhome_1\OPatch>datapatch -verbose
+SQL Patching tool version 12.1.0.1.0 on Fri Feb 26 16:41:36 2016
+Copyright (c) 2014, Oracle.  All rights reserved.
+
+Connecting to database...OK
+Determining current state...
+Currently installed SQL Patches:
+  PDB CDB$ROOT: 21076681
+  PDB PDB$SEED: 21076681
+  PDB PDB:
+Currently installed C Patches: 21076681
+Adding patches to installation queue and performing prereq checks...
+Installation queue:
+  For the following PDBs: CDB$ROOT PDB$SEED
+    Nothing to roll back
+    Nothing to apply
+  For the following PDBs: PDB
+    Nothing to roll back
+    The following patches will be applied: 21076681
+Installing patches...
+Patch installation complete.  Total patches installed: 1
+Validating logfiles...
+Patch 21076681 apply (pdb PDB): SUCCESS
+  logfile: C:\app\gsadmin\product\12.1.0\dbhome_1\sqlpatch\21076681/21076681_apply_CDB12C_PDB_2016Feb26_16_42_36.log (no
+ errors)
+  catbundle generate logfile: c:\app\gsadmin\cfgtoollogs\catbundle\catbundle_PSU_CDB12C_PDB_GENERATE_2016Feb26_16_42_38.
+log (no errors)
+  catbundle apply logfile: c:\app\gsadmin\cfgtoollogs\catbundle\catbundle_PSU_CDB12C_PDB_APPLY_2016Feb26_16_42_39.log (n
+o errors)
+SQL Patching tool complete on Fri Feb 26 16:42:45 2016
+C:\app\gsadmin\product\12.1.0\dbhome_1\OPatch>
+
+-------------------------------------------------------------------------------------------------------------
+Problem: 
+Why "send extract einta logend" always return "No" in gdat8140 even there is no user activities on the SCAPP schema
+
+
+Solution:
+
+-------------------------------------------------------------------------------------------------------------
+Problem: 
+2016-03-11 10:40:34  WARNING OGG-01223  Oracle GoldenGate Capture for Oracle, PINTA.prm:  TCP/IP error 10061 (No connection could be made because the target machine actively refused it.), endpoint: gdat8140:7809.
+
+Both gdat8140 & gdat8141 pinta could not reach each other even mgr processes in both were already up and running.
+
+Solution:
+
+The mgr param had been modified without the "Port 7809" as follows:
+
+DynamicPortList 20000-20099
+Autostart ER *
+AUTORESTART ER *, WaitMinutes 1, Retries 3      
+PURGEOLDEXTRACTS ./dirdat/in*, USECHECKPOINTS, MINKEEPDAYS 30
+PURGEOLDEXTRACTS ./dirdat/pn*, USECHECKPOINTS, MINKEEPDAYS 30
+
+Then put back the "Port 7809" in it and it worked.
+
+Port 7809
+DynamicPortList 20000-20099
+Autostart ER *
+AUTORESTART ER *, WaitMinutes 1, Retries 3      
+PURGEOLDEXTRACTS ./dirdat/in*, USECHECKPOINTS, MINKEEPDAYS 30
+PURGEOLDEXTRACTS ./dirdat/pn*, USECHECKPOINTS, MINKEEPDAYS 30
+
+
+
+-------------------------------------------------------------------------------------------------------------
+Problem: 
+After restart OGG in gdat8141, found that rinta try to read the purged pn000027. It should read pn000029 instead.
+2016-03-11 10:21:07  ERROR   OGG-01091  Oracle GoldenGate Delivery for Oracle, RINTA.prm:  Unable to open file "./dirdat/pn000027" (error 2, The system cannot find the file specified.).
+
+Solution:
+So, direct it to read pn000029
+alter replicat rinta, extseqno 29, extrba 0
+
+2016-03-11 10:29:58  INFO    OGG-00987  Oracle GoldenGate Command Interpreter for Oracle:  GGSCI command (gsadmin): alter replicat rinta extseqno 29 extrba 0.
+
+But then it hit 
+
+2016-03-11 10:33:30  WARNING OGG-01154  Oracle GoldenGate Delivery for Oracle, RINTA.prm:  SQL error 1 mapping PDB1.SCAPP.SYSLOG to PDB.SCAPP.SYSLOG OCI Error ORA-00001: unique constraint (SCAPP.LOGDATE_PK) violated (status = 1), SQL <INSERT INTO "SCAPP"."SYSLOG" ("LOGDATE","REMARK") VALUES (:a0,:a1)>.
+
+This was the duplicated record that had already been replicated. So skip the transcation.
+
+alter replicat rinta skiptransaction
+
+Don't know why rinta picked up the purged pn000027. So, it is better to keep the trail files longer enough or have a backup of it.
+
+
+############################################################################################################
+# Notes
+############################################################################################################
+
+The delivery console is for the replicat process
+
+-------------------------------------------------------------------------------------------------------------
+
+13.4 Configuration Guidelines for DDL Support
+The following are guidelines to take into account when configuring Oracle GoldenGate processes to support DDL replication.
+
+13.4.1 Database Privileges
+See Chapter 4, "Establishing Oracle GoldenGate Credentials" for database privileges that are required for Oracle GoldenGate 
+to support DDL capture and replication.
+
+13.4.2 Parallel Processing
+If using parallel Extract and/or Replicat processes, keep related DDL and DML together in the same process stream to ensure data integrity. 
+Configure the processes so that:
+all DDL and DML for any given object are processed by the same Extract group and by the same Replicat group.
+all objects that are relational to one another are processed by the same process group.
+For example, if ReplicatA processes DML for Table1, then it should also process the DDL for Table1. If Table2 has a foreign key to Table1, 
+then its DML and DDL operations also should be processed by ReplicatA.
+If an Extract group writes to multiple trails that are read by different Replicat groups, Extract sends all of the DDL to all of the trails. 
+Use each Replicat group to filter the DDL by using the filter options of the DDL parameter in the Replicat parameter file.
+
+13.4.3 DDL and DML in Data Pumps
+If using a data pump, configure DML for PASSTHRU mode if the objects are using DDL support. DDL is passed through a data pump in PASSTHRU mode, 
+so the same must be true of the DML. Any filtering, mapping, or transformation of the DML must be done by the primary Extract or by Replicat. 
+However, tables that do not use DDL support can be configured in NOPASSTHRU mode to allow data filtering, and manipulation by a data pump.
+To configure tables for PASSTHRU, NOPASSTHRU, or both, do the following:
+In the parameter file of the data pump, place the PASSTHRU parameter before all of the TABLE statements that contain tables that use DDL support.
+In the same parameter file, you can place the NOPASSTHRU parameter before any TABLE statements that contain tables that do not use DDL support, 
+if you want data filtering, mapping, or transformation to be performed for them.
+Do not use any of the DDL configuration parameters for a data pump: DDL, DDLOPTIONS, DDLSUBST, DDLERROR, 
+or any of the Oracle GoldenGate tracing parameters with DDL-related options.
+For more information about PASSTHRU and NOPASSTHRU, see Reference for Oracle GoldenGate for Windows and UNIX.
+
+-------------------------------------------------------------------------------------------------------------
+
+The ESXi(31.246) of gdat8140 was found datastore full. gdat8140 got hanged and then re-booted.
+The OGG was still working after the re-boot.
+
+-------------------------------------------------------------------------------------------------------------
+
+	
