@@ -1,0 +1,1145 @@
+#############################################################################################################
+# Summary
+#############################################################################################################
+#
+# Task: Test Nimble storages replication between sites for Oracle running RAC
+# Date: Aug 2016
+# Author: James
+# The file is located in d:\land_datal\nimbleOracleRACTest.txt
+# 
+
+#############################################################################################################
+# RAC Test Environment
+#############################################################################################################
+gdat9101 centos 7.1 192.168.30.101
+gdat9102 centos 7.1 192.168.30.102
+
+Oracle 12c(12.1.0.2) RAC x86_64
+Grid Infrastruction 12.1.0.2
+
+Nible storage provides shared disk for oracle RAC
+
+
+#############################################################################################################
+# Production consideration
+#############################################################################################################
+From oracle software investment guide, for rac on standard edition 2, a max of 2 one-socket servers is 
+only allowed. Each node can only use a max of 8 CPU threads per instance at any time.
+
+The device mapper for OCRVOTE should be at least 6GB for external redundancy.
+
+
+Notes
+Beware: CPU Threads are not the same as CPU Cores 
+http://databaseperformance.blogspot.hk/2011/07/beware-cpu-threads-are-not-same-as-cpu.html
+
+Hyper-Threading On or Off for Oracle?
+http://itpeernetwork.intel.com/hyper-threading-on-or-off-for-oracle/
+
+
+#############################################################################################################
+# Prerequisites
+#############################################################################################################
+-- Network Tests
+
+-- The public IPs
+ping gdat9101
+ping gdat9102
+
+-- The SCAN 
+nslookup oracle-scan
+host oracle-scan
+nslookup 192.168.30.105
+nslookup 192.168.30.106
+nslookup 192.168.30.107
+host 192.168.30.105
+host 192.168.30.106
+host 192.168.30.107
+
+-- The VIPs
+nslookup gdat9101-vip
+host gdat9101-vip
+nslookup gdat9102-vip
+host gdat9102-vip
+nslookup 192.168.30.103
+host 192.168.30.103
+nslookup 192.168.30.104
+host 192.168.30.104
+ping gdat9101-vip (should not work, destination host unreachable)
+ping gdat9102-vip (should not work, destination host unreachable)
+
+-- The priviate IPs
+ping 172.16.0.101
+ping 172.16.0.102
+
+-- Install required packages
+yum list `awk '{print $1}' ./req-rpm.txt`
+
+yum install `awk '{print $1}' ./req-rpm.txt` -y
+
+yum install `awk '{print $1}' ./missing.txt` -y
+
+Installed:
+  gcc.x86_64 0:4.8.5-4.el7                       gcc-c++.x86_64 0:4.8.5-4.el7
+  glibc-devel.x86_64 0:2.17-106.0.1.el7_2.8      libstdc++-devel.x86_64 0:4.8.5-4.el7
+
+Dependency Installed:
+  cpp.x86_64 0:4.8.5-4.el7                     glibc-headers.x86_64 0:2.17-106.0.1.el7_2.8
+  kernel-headers.x86_64 0:3.10.0-327.28.2.el7  libmpc.x86_64 0:1.0.1-3.el7
+
+Dependency Updated:
+  glibc.x86_64 0:2.17-106.0.1.el7_2.8      glibc-common.x86_64 0:2.17-106.0.1.el7_2.8
+  libgcc.x86_64 0:4.8.5-4.el7              libgomp.x86_64 0:4.8.5-4.el7
+  libstdc++.x86_64 0:4.8.5-4.el7
+
+Complete!
+
+
+
+-- Disable secure linux
+cp -p /etc/selinux/config /etc/selinux/config.ori
+vi /etc/selinux/config
+--------------------------------
+SELINUX=permissive
+--------------------------------
+
+#setenforce Permissive
+
+-- Set kernel parameters
+cp -p /etc/sysctl.conf /etc/sysctl.conf.ori
+vi /etc/sysctl.conf
+--------------------------------
+vm.swappiness = 1
+vm.dirty_background_ratio = 3
+vm.dirty_ratio = 80
+vm.dirty_expire_centisecs = 500
+vm.dirty_writeback_centisecs = 100
+kernel.shmmax = 4398046511104
+kernel.shmall = 1073741824
+kernel.shmmni = 4096
+kernel.sem = 250 32000 100 128
+fs.file-max = 6815744
+fs.aio-max-nr = 3145728
+net.ipv4.ip_local_port_range = 9000 65500
+net.core.rmem_default = 262144
+net.core.rmem_max = 16780000
+net.core.wmem_default = 262144
+net.core.wmem_max = 16780000
+kernel.panic_on_oops = 1
+net.ipv4.tcp_rmem = 10240 87380 16780000
+net.ipv4.tcp_wmem = 10240 87380 16780000
+kernel.msgmni = 2878
+net.ipv4.conf.ens224.rp_filter = 2
+--------------------------------
+
+sysctl -p
+
+-- Include the conf file as follows
+vi /etc/sysctl.d/98-oracle.conf
+--------------------------------
+vm.swappiness = 1
+vm.dirty_background_ratio = 3
+vm.dirty_ratio = 80
+vm.dirty_expire_centisecs = 500
+vm.dirty_writeback_centisecs = 100
+kernel.shmmax = 4398046511104
+kernel.shmall = 1073741824
+kernel.shmmni = 4096
+kernel.sem = 250 32000 100 128
+fs.file-max = 6815744
+fs.aio-max-nr = 3145728
+net.ipv4.ip_local_port_range = 9000 65500
+net.core.rmem_default = 262144
+net.core.rmem_max = 16780000
+net.core.wmem_default = 262144
+net.core.wmem_max = 16780000
+kernel.panic_on_oops = 1
+net.ipv4.tcp_rmem = 10240 87380 16780000
+net.ipv4.tcp_wmem = 10240 87380 16780000
+kernel.msgmni = 2878
+net.ipv4.conf.ens224.rp_filter = 2
+--------------------------------
+
+sysctl -p /etc/sysctl.d/98-oracle.conf
+
+-- Add users and groups
+groupadd --gid 54321 oinstall
+groupadd --gid 54322 dba
+groupadd --gid 54323 asmdba
+groupadd --gid 54324 asmoper
+groupadd --gid 54325 asmadmin
+groupadd --gid 54326 oper
+groupadd --gid 54327 backupdba
+groupadd --gid 54328 dgdba
+groupadd --gid 54329 kmdba
+useradd --uid 54321 --gid oinstall --groups dba,oper,asmdba,asmoper,backupdba,dgdba,kmdba oracle
+passwd oracle
+useradd --uid 54322 --gid oinstall --groups dba,asmadmin,asmdba,asmoper grid
+passwd grid
+
+-- both password is Gisp201608
+
+id oracle
+id grid
+
+
+vi /etc/security/limits.d/99-grid-oracle-limits.conf
+--------------------------------------
+oracle soft nproc 131072 #Ora bug 15971421
+oracle hard nproc 131072
+oracle soft nofile 131072
+oracle hard nofile 131072
+oracle soft stack 10240
+oracle hard stack 32768
+oracle soft core unlimited
+oracle hard core unlimited
+oracle soft memlock 50000000
+oracle hard memlock 50000000
+grid soft nproc 131072 #Ora bug 15971421
+grid hard nproc 131072
+grid soft nofile 131072
+grid hard nofile 131072
+grid soft stack 10240
+grid hard stack 32768
+
+--------------------------------------
+
+vi /etc/profile.d/oracle-grid.sh
+--------------------------------------
+#Setting the appropriate ulimits for oracle and grid user
+if [ $USER = "oracle" ]; then
+if [ $SHELL = "/bin/ksh" ]; then
+ulimit -u 131072
+ulimit -n 131072
+else
+ulimit -u 131072 -n 131072
+fi
+fi
+if [ $USER = "grid" ]; then
+if [ $SHELL = "/bin/ksh" ]; then
+ulimit -u 131072
+ulimit -n 131072
+else
+ulimit -u 131072 -n 131072
+fi
+fi
+
+
+--------------------------------------
+
+-- Log in as oracle to check ulimit
+# ulimit -a
+
+-- setup udev
+[root@gdat9101 ~]# for i in rac-cluster-ocr rac-cluster-ocr2 rac-cluster-ocr3 db1 db2 fra redo; do printf "%s %s\n" "$i" "$(udevadm info --query=all --name=/dev/mapper/$i | grep -i dm_uuid)"; done
+
+rac-cluster-ocr E: DM_UUID=mpath-2185e07f801d1db936c9ce90056cb6973
+rac-cluster-ocr2 E: DM_UUID=mpath-2afd4a222ba864ce96c9ce90056cb6973
+rac-cluster-ocr3 E: DM_UUID=mpath-280269ed1f352ebf76c9ce90056cb6973
+db1 E: DM_UUID=mpath-25133dd094b6f6c5e6c9ce90056cb6973
+db2 E: DM_UUID=mpath-2221fd5b8843b096d6c9ce90056cb6973
+fra E: DM_UUID=mpath-2f3099b852f4732de6c9ce90056cb6973
+redo E: DM_UUID=mpath-2c44b90047313c53f6c9ce90056cb6973
+
+vi /etc/udev/rules.d/99-oracle-asmdevices.rules
+-----------------------------------------------------------------------------------------------------------------
+KERNEL=="dm-*",ENV{DM_UUID}=="mpath-2185e07f801d1db936c9ce90056cb6973",OWNER="grid",GROUP="asmadmin",MODE="0660"
+KERNEL=="dm-*",ENV{DM_UUID}=="mpath-2afd4a222ba864ce96c9ce90056cb6973",OWNER="grid",GROUP="asmadmin",MODE="0660"
+KERNEL=="dm-*",ENV{DM_UUID}=="mpath-280269ed1f352ebf76c9ce90056cb6973",OWNER="grid",GROUP="asmadmin",MODE="0660"
+KERNEL=="dm-*",ENV{DM_UUID}=="mpath-25133dd094b6f6c5e6c9ce90056cb6973",OWNER="grid",GROUP="asmadmin",MODE="0660"
+KERNEL=="dm-*",ENV{DM_UUID}=="mpath-2221fd5b8843b096d6c9ce90056cb6973",OWNER="grid",GROUP="asmadmin",MODE="0660"
+KERNEL=="dm-*",ENV{DM_UUID}=="mpath-2f3099b852f4732de6c9ce90056cb6973",OWNER="grid",GROUP="asmadmin",MODE="0660"
+KERNEL=="dm-*",ENV{DM_UUID}=="mpath-2c44b90047313c53f6c9ce90056cb6973",OWNER="grid",GROUP="asmadmin",MODE="0660"
+---------------------------------------------------------------------------------------------------------------
+
+-- Show device mapper info
+for i in rac-cluster-ocr rac-cluster-ocr2 rac-cluster-ocr3 db1 db2 fra redo; do printf "%s %s\n" "$i" "$(ls -ll /dev/mapper/$i)"; done
+
+rac-cluster-ocr lrwxrwxrwx. 1 root root 7 Aug 10 11:52 /dev/mapper/rac-cluster-ocr -> ../dm-2
+rac-cluster-ocr2 lrwxrwxrwx. 1 root root 7 Aug 10 11:52 /dev/mapper/rac-cluster-ocr2 -> ../dm-5
+rac-cluster-ocr3 lrwxrwxrwx. 1 root root 7 Aug 10 11:52 /dev/mapper/rac-cluster-ocr3 -> ../dm-6
+db1 lrwxrwxrwx. 1 root root 7 Aug 10 11:52 /dev/mapper/db1 -> ../dm-3
+db2 lrwxrwxrwx. 1 root root 7 Aug 10 11:52 /dev/mapper/db2 -> ../dm-0
+fra lrwxrwxrwx. 1 root root 7 Aug 10 11:52 /dev/mapper/fra -> ../dm-1
+redo lrwxrwxrwx. 1 root root 7 Aug 10 11:52 /dev/mapper/redo -> ../dm-4
+
+-- Apply and test rules ok for all device mapper. refer appendix for sample output
+udevadm test /sys/block/dm-0
+udevadm test /sys/block/dm-1
+udevadm test /sys/block/dm-2
+udevadm test /sys/block/dm-3
+udevadm test /sys/block/dm-4
+udevadm test /sys/block/dm-5
+udevadm test /sys/block/dm-6
+
+-- confirm permission set to grid for all device mapper
+ls -lh /dev/dm-0
+ls -lh /dev/dm-1
+ls -lh /dev/dm-2
+ls -lh /dev/dm-3
+ls -lh /dev/dm-4
+ls -lh /dev/dm-5
+ls -lh /dev/dm-6
+
+-- Create grid directory
+mkdir --parents /u01/app/grid
+chown --recursive grid.oinstall /u01/
+
+-- login as grid and in node one
+mkdir /home/grid/grid-software
+
+-- Copy the grid setup files into /home/grid/grid-software
+
+-- Unzip the grid setup zip
+cd /home/grid/grid-software
+unzip linuxamd64_12102_grid_1of2.zip
+unzip linuxamd64_12102_grid_2of2.zip
+
+-- Make sure xming is started
+
+-- SSH to grid from root session
+ssh -Y grid@gdat9101
+
+-- Run grid installer. Refer the folder "setupGrid" for the screenshots.
+/home/grid/grid-software/grid/runInstaller
+
+-- runInstaller checked that VIP is in use because it is binded to ens192. Need to down the NIC and modify its conf file
+-- to ONBOOT=no
+ifconfig ens192 down
+vi /etc/sysconfig/network-scripts/ifcfg-ens192
+
+-- At this stage, the grid should be installed. Check the grid is working
+# $GRID_HOME/bin/crsctl check crs
+CRS-4638: Oracle High Availability Services is online
+CRS-4537: Cluster Ready Services is online
+CRS-4529: Cluster Synchronization Services is online
+CRS-4533: Event Manager is online
+
+
+-- Now let's install the RAC database
+-- login as oracle and in node one
+mkdir /home/oracle/oracle-software
+
+-- Copy the oracle RAC setup files into /home/oracle/oracle-software
+
+-- Unzip the oracle setup zip. This is the Oracle 12c RAC SE2 edition
+cd /home/oracle/oracle-software
+unzip linuxamd64_12102_database_se2_1of2.zip
+unzip linuxamd64_12102_database_se2_2of2.zip
+
+-- Run oralce runInstaller to install the software only. We will create the RAC database later...
+/home/oracle/oracle-software/database/runInstaller
+
+-- Now, we create the ASM disk group for the DATA, FRA and REDO
+-- Login as grid user to run the asmca to create DATADG, FRADG and REDODG diskgroups
+ssh -Y grid@gdat9101
+/u01/app/12.1.0/grid/bin/asmca
+
+-- Now, we create the RAC database
+-- Login as oracle user to run dbca
+ssh -Y oracle@gdat9101
+/u01/app/oracle/product/12.1.0/dbhome_1/bin/dbca &
+
+
+
+
+
+#############################################################################################################
+# RAC Test cases
+#############################################################################################################
+This Part focus on storage based replication and its applicability in Oracle RAC for dual site failover.
+
+Storages site replication test
+a. Setup oracle RAC with sample spatial data and dual site nimble storage replication
+b. Site failover test to make sure Oracle RAC can run in standby site
+c. Switch back test
+d. Test oracle grid patching and RAC patching in both sites
+
+
+
+#############################################################################################################
+# Issue during installation
+#############################################################################################################
+1. On runInstaller to install grid, error "Error invoking target 'client_sharedlib' of makefile" appeared.
+It's due to some pre-requisites packages not installed yet.
+
+2. On runInstaller to install grid, it has prerequisites checking, following warnings appear
+a. Device checks for ASM (the 3 vcrvote disks are in the same physical disks. They should be in different physical disks)
+b. Daemon "avahi-daemon" not configured and running
+c. /dev/shm mounted as temporary file system
+
+--------------------------------------------------------------------------------------------------------------
+2. On creating the rac database using dbca, it hits
+ORA-01613:instance UNNAMED_INSTANCE_2(thread 2) only has 0 logs - at least 2 logs required to enable.
+
+Node 1 can starutp, but not node 2. Node 2 cannot be mounted.
+
+Tried to mount it but failed
+SQL> alter database mount;
+alter database mount
+*
+ERROR at line 1:
+ORA-01618: redo thread 2 is not enabled - cannot mount
+
+Query the v$log in node 1 only find thread 1 redo logs. Don't know why, just add the redo logs for thread 2 as follows:
+
+-- In node 1, add logfile for thread 2
+alter database add logfile thread 2 group 5('+REDODG') size 300m;
+alter database add logfile thread 2 group 6('+REDODG') size 300m;
+alter database add logfile thread 2 group 7('+REDODG') size 300m;
+alter database add logfile thread 2 group 8('+REDODG') size 300m;
+
+alter database enable thread 2;
+
+-- In node 2, shutdown and startup and it worked.
+shutdown immediate;
+startup;
+
+-- Check the redo logs are there
+SQL> select group#,thread#,members,status from v$log;
+
+    GROUP#    THREAD#    MEMBERS STATUS
+---------- ---------- ---------- ----------------
+         1          1          1 INACTIVE
+         2          1          1 INACTIVE
+         3          1          1 INACTIVE
+         4          1          1 CURRENT
+         5          2          1 INACTIVE
+         6          2          1 CURRENT
+         7          2          1 UNUSED
+         8          2          1 UNUSED
+
+		 
+		 
+
+#############################################################################################################
+# appendix
+#############################################################################################################
+-- example output
+[root@gdat9101 ~]# udevadm test /sys/block/dm-0
+calling: test
+version 208
+This program is for debugging only, it does not run any program
+specified by a RUN key. It may show incorrect results, because
+some values may be different, or not available at a simulation run.
+
+=== trie on-disk ===
+tool version:          208
+file size:         6376691 bytes
+header size             80 bytes
+strings            1401963 bytes
+nodes              4974648 bytes
+load module index
+read rules file: /usr/lib/udev/rules.d/10-dm.rules
+read rules file: /usr/lib/udev/rules.d/11-dm-lvm.rules
+read rules file: /usr/lib/udev/rules.d/11-dm-mpath.rules
+read rules file: /usr/lib/udev/rules.d/13-dm-disk.rules
+read rules file: /usr/lib/udev/rules.d/40-libgphoto2.rules
+IMPORT found builtin 'usb_id --export %%p', replacing /usr/lib/udev/rules.d/40-libgphoto2.rules:11
+read rules file: /usr/lib/udev/rules.d/40-redhat.rules
+read rules file: /usr/lib/udev/rules.d/40-usb_modeswitch.rules
+read rules file: /usr/lib/udev/rules.d/42-usb-hid-pm.rules
+read rules file: /usr/lib/udev/rules.d/50-rbd.rules
+read rules file: /usr/lib/udev/rules.d/50-udev-default.rules
+read rules file: /usr/lib/udev/rules.d/56-hpmud.rules
+read rules file: /usr/lib/udev/rules.d/60-alias-kmsg.rules
+read rules file: /usr/lib/udev/rules.d/60-cdrom_id.rules
+read rules file: /usr/lib/udev/rules.d/60-fprint-autosuspend.rules
+read rules file: /usr/lib/udev/rules.d/60-keyboard.rules
+read rules file: /usr/lib/udev/rules.d/60-net.rules
+read rules file: /usr/lib/udev/rules.d/60-persistent-alsa.rules
+read rules file: /usr/lib/udev/rules.d/60-persistent-input.rules
+read rules file: /usr/lib/udev/rules.d/60-persistent-serial.rules
+read rules file: /usr/lib/udev/rules.d/60-persistent-storage-tape.rules
+read rules file: /usr/lib/udev/rules.d/60-persistent-storage.rules
+read rules file: /usr/lib/udev/rules.d/60-persistent-v4l.rules
+read rules file: /usr/lib/udev/rules.d/60-raw.rules
+read rules file: /usr/lib/udev/rules.d/61-accelerometer.rules
+read rules file: /usr/lib/udev/rules.d/61-gnome-bluetooth-rfkill.rules
+read rules file: /usr/lib/udev/rules.d/62-multipath.rules
+read rules file: /usr/lib/udev/rules.d/63-md-raid-arrays.rules
+read rules file: /usr/lib/udev/rules.d/64-btrfs.rules
+read rules file: /usr/lib/udev/rules.d/65-libwacom.rules
+read rules file: /usr/lib/udev/rules.d/65-md-incremental.rules
+read rules file: /usr/lib/udev/rules.d/65-sane-backends.rules
+read rules file: /usr/lib/udev/rules.d/69-cd-sensors.rules
+IMPORT found builtin 'usb_id --export %p', replacing /usr/lib/udev/rules.d/69-cd-sensors.rules:89
+read rules file: /usr/lib/udev/rules.d/69-dm-lvm-metad.rules
+read rules file: /usr/lib/udev/rules.d/69-libmtp.rules
+read rules file: /usr/lib/udev/rules.d/69-xorg-vmmouse.rules
+read rules file: /etc/udev/rules.d/70-persistent-ipoib.rules
+read rules file: /usr/lib/udev/rules.d/70-power-switch.rules
+read rules file: /usr/lib/udev/rules.d/70-printers.rules
+read rules file: /usr/lib/udev/rules.d/70-spice-vdagentd.rules
+read rules file: /usr/lib/udev/rules.d/70-touchpad-quirks.rules
+read rules file: /usr/lib/udev/rules.d/70-uaccess.rules
+read rules file: /usr/lib/udev/rules.d/70-wacom.rules
+read rules file: /usr/lib/udev/rules.d/71-biosdevname.rules
+read rules file: /usr/lib/udev/rules.d/71-seat.rules
+read rules file: /usr/lib/udev/rules.d/73-idrac.rules
+read rules file: /usr/lib/udev/rules.d/73-seat-late.rules
+read rules file: /usr/lib/udev/rules.d/75-net-description.rules
+read rules file: /usr/lib/udev/rules.d/75-probe_mtd.rules
+read rules file: /usr/lib/udev/rules.d/75-tty-description.rules
+read rules file: /usr/lib/udev/rules.d/77-mm-ericsson-mbm.rules
+read rules file: /usr/lib/udev/rules.d/77-mm-huawei-net-port-types.rules
+read rules file: /usr/lib/udev/rules.d/77-mm-longcheer-port-types.rules
+read rules file: /usr/lib/udev/rules.d/77-mm-nokia-port-types.rules
+read rules file: /usr/lib/udev/rules.d/77-mm-pcmcia-device-blacklist.rules
+read rules file: /usr/lib/udev/rules.d/77-mm-platform-serial-whitelist.rules
+read rules file: /usr/lib/udev/rules.d/77-mm-simtech-port-types.rules
+read rules file: /usr/lib/udev/rules.d/77-mm-telit-port-types.rules
+read rules file: /usr/lib/udev/rules.d/77-mm-usb-device-blacklist.rules
+read rules file: /usr/lib/udev/rules.d/77-mm-usb-serial-adapters-greylist.rules
+read rules file: /usr/lib/udev/rules.d/77-mm-x22x-port-types.rules
+read rules file: /usr/lib/udev/rules.d/77-mm-zte-port-types.rules
+read rules file: /usr/lib/udev/rules.d/77-nm-olpc-mesh.rules
+read rules file: /usr/lib/udev/rules.d/78-sound-card.rules
+read rules file: /usr/lib/udev/rules.d/80-drivers.rules
+read rules file: /usr/lib/udev/rules.d/80-kvm.rules
+read rules file: /usr/lib/udev/rules.d/80-mm-candidate.rules
+read rules file: /usr/lib/udev/rules.d/80-net-name-slot.rules
+read rules file: /usr/lib/udev/rules.d/80-udisks2.rules
+read rules file: /usr/lib/udev/rules.d/81-kvm-rhel.rules
+read rules file: /usr/lib/udev/rules.d/85-regulatory.rules
+read rules file: /usr/lib/udev/rules.d/85-usbmuxd.rules
+read rules file: /usr/lib/udev/rules.d/90-alsa-restore.rules
+read rules file: /usr/lib/udev/rules.d/90-alsa-tools-firmware.rules
+read rules file: /usr/lib/udev/rules.d/90-iprutils.rules
+read rules file: /usr/lib/udev/rules.d/90-pulseaudio.rules
+read rules file: /usr/lib/udev/rules.d/90-vconsole.rules
+read rules file: /usr/lib/udev/rules.d/91-drm-modeset.rules
+read rules file: /usr/lib/udev/rules.d/95-cd-devices.rules
+read rules file: /usr/lib/udev/rules.d/95-dm-notify.rules
+read rules file: /usr/lib/udev/rules.d/95-udev-late.rules
+read rules file: /usr/lib/udev/rules.d/95-upower-battery-recall-dell.rules
+read rules file: /usr/lib/udev/rules.d/95-upower-battery-recall-fujitsu.rules
+read rules file: /usr/lib/udev/rules.d/95-upower-battery-recall-gateway.rules
+read rules file: /usr/lib/udev/rules.d/95-upower-battery-recall-ibm.rules
+read rules file: /usr/lib/udev/rules.d/95-upower-battery-recall-lenovo.rules
+read rules file: /usr/lib/udev/rules.d/95-upower-battery-recall-toshiba.rules
+read rules file: /usr/lib/udev/rules.d/95-upower-csr.rules
+read rules file: /usr/lib/udev/rules.d/95-upower-hid.rules
+read rules file: /usr/lib/udev/rules.d/95-upower-wup.rules
+read rules file: /usr/lib/udev/rules.d/97-bluetooth-serial.rules
+read rules file: /usr/lib/udev/rules.d/98-kexec.rules
+read rules file: /usr/lib/udev/rules.d/98-rdma.rules
+read rules file: /etc/udev/rules.d/99-oracle-asmdevices.rules
+read rules file: /usr/lib/udev/rules.d/99-qemu-guest-agent.rules
+read rules file: /usr/lib/udev/rules.d/99-systemd.rules
+rules contain 393216 bytes tokens (32768 * 12 bytes), 32575 bytes strings
+28955 strings (242058 bytes), 25958 de-duplicated (212481 bytes), 2998 trie nodes used
+LINK 'mapper/db2' /usr/lib/udev/rules.d/10-dm.rules:121
+LINK 'disk/by-id/dm-name-db2' /usr/lib/udev/rules.d/13-dm-disk.rules:17
+LINK 'disk/by-id/dm-uuid-mpath-2221fd5b8843b096d6c9ce90056cb6973' /usr/lib/udev/rules.d/13-dm-disk.rules:18
+IMPORT builtin 'blkid' /usr/lib/udev/rules.d/13-dm-disk.rules:23
+probe /dev/dm-0 raid offset=0
+GROUP 6 /usr/lib/udev/rules.d/50-udev-default.rules:51
+PROGRAM '/sbin/multipath -c /dev/dm-0' /usr/lib/udev/rules.d/62-multipath.rules:15
+starting '/sbin/multipath -c /dev/dm-0'
+'/sbin/multipath -c /dev/dm-0'(out) 'Aug 10 12:15:58 | /etc/multipath.conf line 2, invalid keyword: user_friendy_names'
+'/sbin/multipath -c /dev/dm-0'(out) 'Aug 10 12:15:58 | the -c option requires a path to check'
+'/sbin/multipath -c /dev/dm-0' [5053] exit with return code 1
+OWNER 54322 /etc/udev/rules.d/99-oracle-asmdevices.rules:5
+GROUP 54325 /etc/udev/rules.d/99-oracle-asmdevices.rules:5
+MODE 0660 /etc/udev/rules.d/99-oracle-asmdevices.rules:5
+handling device node '/dev/dm-0', devnum=b253:0, mode=0660, uid=54322, gid=54325
+set permissions /dev/dm-0, 060660, uid=54322, gid=54325
+preserve already existing symlink '/dev/block/253:0' to '../dm-0'
+found 'b253:0' claiming '/run/udev/links/\x2fdisk\x2fby-id\x2fdm-name-db2'
+creating link '/dev/disk/by-id/dm-name-db2' to '/dev/dm-0'
+preserve already existing symlink '/dev/disk/by-id/dm-name-db2' to '../../dm-0'
+found 'b253:0' claiming '/run/udev/links/\x2fdisk\x2fby-id\x2fdm-uuid-mpath-2221fd5b8843b096d6c9ce90056cb6973'
+creating link '/dev/disk/by-id/dm-uuid-mpath-2221fd5b8843b096d6c9ce90056cb6973' to '/dev/dm-0'
+preserve already existing symlink '/dev/disk/by-id/dm-uuid-mpath-2221fd5b8843b096d6c9ce90056cb6973' to '../../dm-0'
+found 'b253:0' claiming '/run/udev/links/\x2fmapper\x2fdb2'
+creating link '/dev/mapper/db2' to '/dev/dm-0'
+preserve already existing symlink '/dev/mapper/db2' to '../dm-0'
+.ID_FS_TYPE_NEW=
+ACTION=add
+DEVLINKS=/dev/disk/by-id/dm-name-db2 /dev/disk/by-id/dm-uuid-mpath-2221fd5b8843b096d6c9ce90056cb6973 /dev/mapper/db2
+DEVNAME=/dev/dm-0
+DEVPATH=/devices/virtual/block/dm-0
+DEVTYPE=disk
+DM_ACTIVATION=1
+DM_MULTIPATH_TIMESTAMP=1470801159
+DM_NAME=db2
+DM_SUSPENDED=0
+DM_UDEV_DISABLE_LIBRARY_FALLBACK_FLAG=1
+DM_UDEV_PRIMARY_SOURCE_FLAG=1
+DM_UDEV_RULES_VSN=2
+DM_UUID=mpath-2221fd5b8843b096d6c9ce90056cb6973
+ID_FS_TYPE=
+MAJOR=253
+MINOR=0
+MPATH_SBIN_PATH=/sbin
+SUBSYSTEM=block
+TAGS=:systemd:
+USEC_INITIALIZED=66186
+unload module index
+
+--------------------------------------------------------------------------------------------------------------------------------
+#############################################################################################################
+# RAC Monitoring Commands
+#############################################################################################################
+
+If the Oracle High Availability Services daemon (OHASD) is running on all the cluster nodes, then you can start the entire Oracle Clusterware stack (all the processes and resources managed by Oracle Clusterware) on all nodes in the cluster by executing the following command on any node:
+-- login as root, to start all cluster, run 
+/u01/app/12.1.0/grid/bin/crsctl start cluster -all
+
+-- login as root, to start individual cluster, run 
+crsctl start cluster -n <racnode1> 
+
+-- To start the entire Oracle Clusterware stack on a node, including the OHASD process, run 
+crsctl start crs
+
+-- login as root, to check CRS
+/u01/app/12.1.0/grid/bin/crsctl check crs
+
+# $GRID_HOME/bin/crsctl check cluster -all
+******************************************************************
+racnode1:
+CRS-4537: Cluster Ready Services is online
+CRS-4529: Cluster Synchronization Services is online
+CRS-4533: Event Manager is online
+******************************************************************
+racnode2:
+CRS-4537: Cluster Ready Services is online
+CRS-4529: Cluster Synchronization Services is online
+CRS-4533: Event Manager is online
+
+******************************************************************
+If you see that one or more Oracle Clusterware resources are offline, or are missing, then the Oracle Clusterware software did not install properly.
+
+
+-- Check individual resource
+/u01/app/12.1.0/grid/bin/crsctl stat res -t
+/u01/app/12.1.0/grid/bin/crsctl status resource -w "TYPE co 'ora'" -t
+
+
+-- login in grid, to launch ASMCA to check ASM status
+/u01/app/12.1.0/grid/bin/asmca
+
+
+-- login as root to shutdown all cluster
+[root@gdat9101 ~]# /u01/app/12.1.0/grid/bin/crsctl stop cluster -all
+
+CRS-2673: Attempting to stop 'ora.crsd' on 'gdat9101'
+CRS-2673: Attempting to stop 'ora.crsd' on 'gdat9102'
+CRS-2790: Starting shutdown of Cluster Ready Services-managed resources on 'gdat9102'
+CRS-2673: Attempting to stop 'ora.LISTENER.lsnr' on 'gdat9102'
+CRS-2673: Attempting to stop 'ora.cdb12c.db' on 'gdat9102'
+CRS-2673: Attempting to stop 'ora.LISTENER_SCAN1.lsnr' on 'gdat9102'
+CRS-2790: Starting shutdown of Cluster Ready Services-managed resources on 'gdat9101'
+CRS-2673: Attempting to stop 'ora.LISTENER_SCAN2.lsnr' on 'gdat9101'
+CRS-2673: Attempting to stop 'ora.mgmtdb' on 'gdat9101'
+CRS-2673: Attempting to stop 'ora.LISTENER.lsnr' on 'gdat9101'
+CRS-2673: Attempting to stop 'ora.cvu' on 'gdat9101'
+CRS-2673: Attempting to stop 'ora.cdb12c.db' on 'gdat9101'
+CRS-2673: Attempting to stop 'ora.LISTENER_SCAN3.lsnr' on 'gdat9101'
+CRS-2673: Attempting to stop 'ora.oc4j' on 'gdat9101'
+CRS-2677: Stop of 'ora.cvu' on 'gdat9101' succeeded
+CRS-2677: Stop of 'ora.LISTENER_SCAN1.lsnr' on 'gdat9102' succeeded
+CRS-2673: Attempting to stop 'ora.scan1.vip' on 'gdat9102'
+CRS-2677: Stop of 'ora.LISTENER.lsnr' on 'gdat9102' succeeded
+CRS-2673: Attempting to stop 'ora.gdat9102.vip' on 'gdat9102'
+CRS-2677: Stop of 'ora.LISTENER_SCAN2.lsnr' on 'gdat9101' succeeded
+CRS-2673: Attempting to stop 'ora.scan2.vip' on 'gdat9101'
+CRS-2677: Stop of 'ora.LISTENER_SCAN3.lsnr' on 'gdat9101' succeeded
+CRS-2673: Attempting to stop 'ora.scan3.vip' on 'gdat9101'
+CRS-2677: Stop of 'ora.scan2.vip' on 'gdat9101' succeeded
+CRS-2677: Stop of 'ora.LISTENER.lsnr' on 'gdat9101' succeeded
+CRS-2673: Attempting to stop 'ora.gdat9101.vip' on 'gdat9101'
+CRS-2677: Stop of 'ora.scan1.vip' on 'gdat9102' succeeded
+CRS-2677: Stop of 'ora.gdat9102.vip' on 'gdat9102' succeeded
+CRS-2677: Stop of 'ora.scan3.vip' on 'gdat9101' succeeded
+CRS-2677: Stop of 'ora.cdb12c.db' on 'gdat9102' succeeded
+CRS-2673: Attempting to stop 'ora.REDODG.dg' on 'gdat9102'
+CRS-2677: Stop of 'ora.cdb12c.db' on 'gdat9101' succeeded
+CRS-2673: Attempting to stop 'ora.DATADG.dg' on 'gdat9101'
+CRS-2677: Stop of 'ora.REDODG.dg' on 'gdat9102' succeeded
+CRS-2673: Attempting to stop 'ora.FRADG.dg' on 'gdat9102'
+CRS-2673: Attempting to stop 'ora.OCRVOTE.dg' on 'gdat9102'
+CRS-2673: Attempting to stop 'ora.DATADG.dg' on 'gdat9102'
+CRS-2677: Stop of 'ora.OCRVOTE.dg' on 'gdat9102' succeeded
+CRS-2677: Stop of 'ora.FRADG.dg' on 'gdat9102' succeeded
+CRS-2677: Stop of 'ora.mgmtdb' on 'gdat9101' succeeded
+CRS-2673: Attempting to stop 'ora.MGMTLSNR' on 'gdat9101'
+CRS-2677: Stop of 'ora.DATADG.dg' on 'gdat9102' succeeded
+CRS-2673: Attempting to stop 'ora.asm' on 'gdat9102'
+CRS-2677: Stop of 'ora.asm' on 'gdat9102' succeeded
+CRS-2677: Stop of 'ora.gdat9101.vip' on 'gdat9101' succeeded
+CRS-2673: Attempting to stop 'ora.ons' on 'gdat9102'
+CRS-2677: Stop of 'ora.MGMTLSNR' on 'gdat9101' succeeded
+CRS-2677: Stop of 'ora.ons' on 'gdat9102' succeeded
+CRS-2677: Stop of 'ora.DATADG.dg' on 'gdat9101' succeeded
+CRS-2673: Attempting to stop 'ora.FRADG.dg' on 'gdat9101'
+CRS-2673: Attempting to stop 'ora.OCRVOTE.dg' on 'gdat9101'
+CRS-2673: Attempting to stop 'ora.REDODG.dg' on 'gdat9101'
+CRS-2673: Attempting to stop 'ora.net1.network' on 'gdat9102'
+CRS-2677: Stop of 'ora.net1.network' on 'gdat9102' succeeded
+CRS-2792: Shutdown of Cluster Ready Services-managed resources on 'gdat9102' has completed
+CRS-2677: Stop of 'ora.OCRVOTE.dg' on 'gdat9101' succeeded
+CRS-2677: Stop of 'ora.REDODG.dg' on 'gdat9101' succeeded
+CRS-2677: Stop of 'ora.FRADG.dg' on 'gdat9101' succeeded
+CRS-2673: Attempting to stop 'ora.asm' on 'gdat9101'
+CRS-2677: Stop of 'ora.asm' on 'gdat9101' succeeded
+CRS-2677: Stop of 'ora.crsd' on 'gdat9102' succeeded
+CRS-2673: Attempting to stop 'ora.ctssd' on 'gdat9102'
+CRS-2673: Attempting to stop 'ora.evmd' on 'gdat9102'
+CRS-2673: Attempting to stop 'ora.storage' on 'gdat9102'
+CRS-2677: Stop of 'ora.storage' on 'gdat9102' succeeded
+CRS-2673: Attempting to stop 'ora.asm' on 'gdat9102'
+CRS-2677: Stop of 'ora.oc4j' on 'gdat9101' succeeded
+CRS-2673: Attempting to stop 'ora.ons' on 'gdat9101'
+CRS-2677: Stop of 'ora.ctssd' on 'gdat9102' succeeded
+CRS-2677: Stop of 'ora.evmd' on 'gdat9102' succeeded
+CRS-2677: Stop of 'ora.ons' on 'gdat9101' succeeded
+CRS-2673: Attempting to stop 'ora.net1.network' on 'gdat9101'
+CRS-2677: Stop of 'ora.net1.network' on 'gdat9101' succeeded
+CRS-2792: Shutdown of Cluster Ready Services-managed resources on 'gdat9101' has completed
+CRS-2677: Stop of 'ora.crsd' on 'gdat9101' succeeded
+CRS-2673: Attempting to stop 'ora.ctssd' on 'gdat9101'
+CRS-2673: Attempting to stop 'ora.evmd' on 'gdat9101'
+CRS-2673: Attempting to stop 'ora.storage' on 'gdat9101'
+CRS-2677: Stop of 'ora.storage' on 'gdat9101' succeeded
+CRS-2673: Attempting to stop 'ora.asm' on 'gdat9101'
+CRS-2677: Stop of 'ora.ctssd' on 'gdat9101' succeeded
+CRS-2677: Stop of 'ora.evmd' on 'gdat9101' succeeded
+CRS-2677: Stop of 'ora.asm' on 'gdat9102' succeeded
+CRS-2673: Attempting to stop 'ora.cluster_interconnect.haip' on 'gdat9102'
+CRS-2677: Stop of 'ora.cluster_interconnect.haip' on 'gdat9102' succeeded
+CRS-2673: Attempting to stop 'ora.cssd' on 'gdat9102'
+CRS-2677: Stop of 'ora.cssd' on 'gdat9102' succeeded
+CRS-2677: Stop of 'ora.asm' on 'gdat9101' succeeded
+CRS-2673: Attempting to stop 'ora.cluster_interconnect.haip' on 'gdat9101'
+CRS-2677: Stop of 'ora.cluster_interconnect.haip' on 'gdat9101' succeeded
+CRS-2673: Attempting to stop 'ora.cssd' on 'gdat9101'
+CRS-2677: Stop of 'ora.cssd' on 'gdat9101' succeeded
+
+-- Check after all cluster shutdown
+[root@gdat9101 ~]# /u01/app/12.1.0/grid/bin/crsctl check crs
+CRS-4638: Oracle High Availability Services is online
+CRS-4535: Cannot communicate with Cluster Ready Services
+CRS-4530: Communications failure contacting Cluster Synchronization Services daemon
+CRS-4534: Cannot communicate with Event Manager
+
+-- Check ASM status
+[grid@gdat9101 ~]$ /u01/app/12.1.0/grid/bin/srvctl status asm -a
+PRCA-1084 : Failed to retrieve ASM Mode
+PRKH-1010 : Unable to communicate with CRS services.
+PRKH-3003 : An attempt to communicate with the CSS daemon failed
+
+-- Check DB status
+[root@gdat9101 ~]# /u01/app/12.1.0/grid/bin/srvctl status database -d cdb12c
+PRCD-1027 : Failed to retrieve database cdb12c
+PRCR-1070 : Failed to check if resource ora.cdb12c.db is registered
+CRS-0184 : Cannot communicate with the CRS daemon.
+
+-- Startup all cluster
+[root@gdat9101 ~]# /u01/app/12.1.0/grid/bin/crsctl start cluster -all
+CRS-2672: Attempting to start 'ora.cssdmonitor' on 'gdat9101'
+CRS-2672: Attempting to start 'ora.evmd' on 'gdat9101'
+CRS-2672: Attempting to start 'ora.cssdmonitor' on 'gdat9102'
+CRS-2672: Attempting to start 'ora.evmd' on 'gdat9102'
+CRS-2676: Start of 'ora.cssdmonitor' on 'gdat9102' succeeded
+CRS-2676: Start of 'ora.cssdmonitor' on 'gdat9101' succeeded
+CRS-2672: Attempting to start 'ora.cssd' on 'gdat9102'
+CRS-2672: Attempting to start 'ora.cssd' on 'gdat9101'
+CRS-2672: Attempting to start 'ora.diskmon' on 'gdat9101'
+CRS-2672: Attempting to start 'ora.diskmon' on 'gdat9102'
+CRS-2676: Start of 'ora.diskmon' on 'gdat9102' succeeded
+CRS-2676: Start of 'ora.diskmon' on 'gdat9101' succeeded
+CRS-2676: Start of 'ora.evmd' on 'gdat9101' succeeded
+CRS-2676: Start of 'ora.evmd' on 'gdat9102' succeeded
+CRS-2676: Start of 'ora.cssd' on 'gdat9102' succeeded
+CRS-2672: Attempting to start 'ora.ctssd' on 'gdat9102'
+CRS-2676: Start of 'ora.cssd' on 'gdat9101' succeeded
+CRS-2672: Attempting to start 'ora.cluster_interconnect.haip' on 'gdat9102'
+CRS-2672: Attempting to start 'ora.ctssd' on 'gdat9101'
+CRS-2672: Attempting to start 'ora.cluster_interconnect.haip' on 'gdat9101'
+CRS-2676: Start of 'ora.ctssd' on 'gdat9102' succeeded
+CRS-2676: Start of 'ora.ctssd' on 'gdat9101' succeeded
+CRS-2676: Start of 'ora.cluster_interconnect.haip' on 'gdat9102' succeeded
+CRS-2672: Attempting to start 'ora.asm' on 'gdat9102'
+CRS-2676: Start of 'ora.cluster_interconnect.haip' on 'gdat9101' succeeded
+CRS-2672: Attempting to start 'ora.asm' on 'gdat9101'
+CRS-2676: Start of 'ora.asm' on 'gdat9102' succeeded
+CRS-2672: Attempting to start 'ora.storage' on 'gdat9102'
+CRS-2676: Start of 'ora.storage' on 'gdat9102' succeeded
+CRS-2672: Attempting to start 'ora.crsd' on 'gdat9102'
+CRS-2676: Start of 'ora.crsd' on 'gdat9102' succeeded
+CRS-2676: Start of 'ora.asm' on 'gdat9101' succeeded
+CRS-2672: Attempting to start 'ora.storage' on 'gdat9101'
+CRS-2676: Start of 'ora.storage' on 'gdat9101' succeeded
+CRS-2672: Attempting to start 'ora.crsd' on 'gdat9101'
+CRS-2676: Start of 'ora.crsd' on 'gdat9101' succeeded
+[root@gdat9101 ~]#
+
+[grid@gdat9101 ~]$ /u01/app/12.1.0/grid/bin/crsctl check crs
+CRS-4638: Oracle High Availability Services is online
+CRS-4537: Cluster Ready Services is online
+CRS-4529: Cluster Synchronization Services is online
+CRS-4533: Event Manager is online
+
+-- Check ASM status with SRVCTL
+[grid@gdat9101 ~]$  /u01/app/12.1.0/grid/bin/srvctl status asm -a
+ASM is running on gdat9101,gdat9102
+ASM is enabled.
+
+-- Check DATABASE status with SRVCTL
+[grid@gdat9101 ~]$ /u01/app/12.1.0/grid/bin/srvctl status database -d cdb12c
+Instance cdb12c1 is running on node gdat9101
+Instance cdb12c2 is running on node gdat9102
+
+-- Check LISTENER status with SRVCTL
+[grid@gdat9101 ~]$ /u01/app/12.1.0/grid/bin/srvctl status listener
+Listener LISTENER is enabled
+Listener LISTENER is running on node(s): gdat9101,gdat9102
+
+-- Use cluvfy to perform post check
+# cluvfy stage -post crsinst -n gdat9101,gdat9102
+
+To enable automatic startup for all Oracle Clusterware daemons:
+# crsctl enable crs
+
+To disable automatic startup for all Oracle Clusterware daemons:
+# crsctl disable crs
+
+To run the Oracle Clusterware Diagnostics Collection script:
+# Grid_home/bin/diagcollection.pl --collect
+
+To verify the existence of node applications namely the virtual IP (VIP), Oracle Notification Services (ONS), and Global Service Daemon (GSD), on all the nodes.
+# cluvfy comp nodeapp [ -n node_list] [-verbose]
+
+To verify the integrity of Oracle Clusterware components:
+# cluvfy comp crs [ -n node_list] [-verbose]
+
+Verifying the Integrity of the Oracle Cluster Registry
+# cluvfy comp ocr [ -n node_list] [-verbose]
+
+To verify the integrity of your cluster
+# cluvfy comp clu [-verbose]
+
+To check the settings for the interconnect
+# cluvfy comp nodecon -n node_list -verbose
+
+#############################################################################################################
+# RAC Cheatsheet
+#############################################################################################################
+
+Check CRS Status
+[root@racnode1 ~]#crsctl check crs
+Check Clusterware Resources
+[root@racnode1 ~]# crs_stat -t -v
+Stopping the Oracle Clusterware Stack on the Local Server
+[root@racnode1 ~]# /u01/app/11.2.0/grid/bin/crsctl stop cluster
+CRS-2673: Attempting to stop 'ora.crsd' on 'racnode1'
+...
+...
+Stop Oracle Clusterware stack on all servers in the cluster
+[root@racnode1 ~]# crsctl stop cluster -all
+Starting the Oracle Clusterware Stack on the Local Server
+[root@racnode1 ~]# /u01/app/11.2.0/grid/bin/crsctl start cluster
+CRS-2673: Attempting to start 'ora.crsd' on 'racnode1'
+...
+...
+Start Oracle Clusterware stack on all servers in the cluster
+[root@racnode1 ~]# crsctl start cluster -all
+Check Cluster Nodes
+[oracle@racnode1 ~]$olsnodes -n
+Confirming Oracle ASM Function for Oracle Clusterware Files
+If you installed the OCR and voting disk files on Oracle ASM, then use the following command syntax as the Grid Infrastructure installation owner to confirm that your Oracle ASM installation is running:
+
+[oracle@racnode1 ~]$srvctl status asm -a
+Check Oracle Cluster Registry (OCR)
+[oracle@racnode1 ~]$ocrcheck
+Check Voting Disk
+[oracle@racnode1 ~]$crsctl query css votedisk
+Check Status Oracle Enterprise Manager
+[oracle@racnode1 ~]$emctl status dbconsole
+Start Oracle Enterprise Manager
+[oracle@racnode1 ~]$emctl start dbconsole
+Stop Oracle Enterprise Manager
+[oracle@racnode1 ~]$emctl stop dbconsole
+All Oracle Instances - (Database Status)
+[oracle@racnode1 ~]$ srvctl status database -d racdb
+Single Oracle Instance - (Status of Specific Instance)
+[oracle@racnode1 ~]$ srvctl status instance -d racdb -i racdb1
+Start/Stop All Instances with SRVCTL
+[oracle@racnode1 ~]$ srvctl stop database -d racdb
+[oracle@racnode1 ~]$ srvctl start database -d racdb
+Node Applications - (Status)
+[oracle@racnode1 ~]$ srvctl status nodeapps
+Node Applications - (Configuration)
+[oracle@racnode1 ~]$ srvctl config nodeapps
+List all Configured Databases
+[oracle@racnode1 ~]$ srvctl config database
+Database - (Configuration)
+[oracle@racnode1 ~]$ srvctl config database -d racdb -a
+ASM - (Status)
+[oracle@racnode1 ~]$ srvctl status asm
+ASM - (Configuration)
+[oracle@racnode1 ~]$srvctl config asm -a
+TNS listener - (Status)
+[oracle@racnode1 ~]$ srvctl status listener
+SCAN - (Status)
+[oracle@racnode1 ~]$ srvctl status scan
+SCAN - (Configuration)
+[oracle@racnode1 ~]$ srvctl config scan
+VIP - (Status of Specific Node)
+[oracle@racnode1 ~]$ srvctl status vip -n racnode1
+[oracle@racnode1 ~]$ srvctl status vip -n racnode2
+VIP - (Configuration of Specific Node)
+[oracle@racnode1 ~]$ srvctl config vip -n racnode1
+[oracle@racnode1 ~]$ srvctl config vip -n racnode2
+Configuration for Node Applications - (VIP, GSD, ONS, Listener)
+[oracle@racnode1 ~]$ srvctl config nodeapps -a -g -s -l
+Verifying Clock Synchronization across the Cluster Nodes
+[oracle@racnode1 ~]$ cluvfy comp clocksync -verbose
+
+
+
+
+--------------------------------------------------------------------------------------------------------------------------------
+
+#############################################################################################################
+# Oracle clusterware and RAC Concept
+#############################################################################################################
+-------------------------------------------------------------------------------------------------
+About Oracle Grid Infrastructure for a Cluster and Oracle RAC
+-------------------------------------------------------------------------------------------------
+
+Oracle Clusterware and Oracle ASM are installed into a single home directory, which is called the Grid home. Oracle Grid Infrastructure for a cluster refers to the installation of the combined products. Oracle Clusterware and Oracle ASM are still individual products, and are referred to by those names.
+
+Upon installation of Oracle Grid Infrastructure for a cluster, a default server pool, called the Free pool, is created automatically. All servers in a new installation are assigned to the Free server pool, initially.
+
+When you create an Oracle RAC database that is a policy-managed database, you specify the number of servers that are needed for the database, and a server pool is automatically created for the database. Oracle Clusterware populates the server pool with the servers it has available. If you do not use server pools, then you create an administrator-managed database.
+
+Oracle Grid Infrastructure installed in an Oracle Flex Cluster configuration is a scalable, dynamic, robust network of nodes. Oracle Flex Clusters provide a platform for a variety of applications, including Oracle Real Application Clusters (Oracle RAC) databases with large numbers of nodes. Oracle Flex Clusters also provide a platform for other service deployments that require coordination and automation for high availability.
+
+Changing the cluster mode requires cluster downtime.
+Oracle does not support changing an Oracle Flex Cluster to an Oracle Clusterware standard Cluster.
+Oracle Flex Cluster requires Grid Naming Service (GNS).
+Zone delegation is not required.
+
+Links
+Oracle Flex Clusters
+http://docs.oracle.com/database/121/CWADD/bigcluster.htm#CWADD92560
+
+-------------------------------------------------------------------------------------------------
+About RAC IPs
+-------------------------------------------------------------------------------------------------
+Public IP:  , is the IP address used to connect database from public network .
+
+Private IP: is the private IP between cluster nodes (used for cluster intercommunication like cache fusion).
+
+VIP : is a cluster resource , or cluster managed IP used failover and TAF , exists on top of Public network . (this IP avoids tcp IP time out waiting, and faster failover )
+
+SCAN : Single Client Access Name (SCAN) is a new Oracle Real Application Clusters (RAC) 11g Release 2 feature that provides a single name for clients to access Oracle Databases running in a cluster. The benefit is that the client’s connect information does not need to change if you add or remove nodes in the cluster.
+
+Public IP is the standard fixed IP address for a server.
+
+Virtual IP is a secondary "public" IP for a server - but with the ability for a server's virtual IP to be hosted by another server. For example, if server 1 goes down (crashes/maintenance/etc), server 1's virtual IP will fail over to server 2. Clients can still use and connect to server 1's virtual IP, only this IP is now being handled by server 2. In other words, there is redundancy and high availability for a server's virtual IP.
+
+SCAN IP is the IP address for the cluster. It is hosted by any of the cluster's server nodes. The basic concept is that the client needs only to know a single IP (Access Name) to connect to the cluster. With the connection the client requests a specific cluster (db) service. The SCAN listener knows which cluster nodes support that service, which cluster nodes are up and available, and can load balance that client to a specific server - upon which the client is redirected to that server (via virtual or public IP) for accessing the db service it requested.
+
+Private IPs are used for the cluster's Interconnect. The Interconnect is high-speed low-latency PRIVATE communication infrastructure for cluster nodes to communicate with one another (basically they share memory across it). The recommended Interconnect is Infiniband. This is what Oracle's engineered systems like ODA (Oracle Database Appliance) and Exadata Database Machine, uses. In my book - not using Infiniband with RAC is a major performance and scalability concern. It is a 40Gbs infrastructure supporting protocols like RDMA (Remote Direct Memory Access). It is by far superior to using UDP protocol over a mere 10Gbs Gigabyte Ethernet network.
+
+
+Reference
+https://community.oracle.com/tech/apps-infra/discussion/3952428/whats-is-public-ip-and-private-ip-and-virutal-ip-and-scan-ip-rac-clusterware-installation
+-------------------------------------------------------------------------------------------------
+About Oracle Automatic Storage Management
+-------------------------------------------------------------------------------------------------
+Oracle Automatic Storage Management (Oracle ASM) is an integrated, high-performance volume manager and file system. Oracle ASM supports storing the Oracle Clusterware OCR and voting disk files, and also provides a general purpose cluster file system called Oracle Automatic Storage Management Cluster File System (Oracle ACFS).
+
+Oracle ASM is implemented as a special kind of Oracle instance, with its own System Global Area and background processes. The Oracle ASM instance is tightly integrated with Oracle Clusterware and Oracle Database. Every server running one or more database instances that use Oracle ASM for storage has an Oracle ASM instance.
+
+Oracle Automatic Storage Management Cluster File System (Oracle ACFS) is a new multi-platform, scalable file system, and storage management technology that extends Oracle ASM functionality to support customer files maintained outside of the Oracle database. Files supported by Oracle ACFS include database and application executables, trace files, alert logs, application reports, BFILEs, and configuration files. Oracle ACFS leverages Oracle ASM functionality to provide dynamic file system resizing, striping, and mirroring.
+
+The ASM log is, for example, stored in /u01/app/grid/diag/asm/+asm/+ASM1/trace/alert_+ASM1.log for ASM instance +ASM1
+
+-------------------------------------------------------------------------------------------------
+Tools for Installing, Configuring, and Managing Oracle RAC
+-------------------------------------------------------------------------------------------------
+
+If you use ASMCMD, SRVCTL, SQL*Plus, or LSNRCTL to manage Oracle ASM or its listener, then use the executable files located in the Grid home, not the executable files located in the Oracle Database home, and set the ORACLE_HOME environment variable to the location of the Grid home.
+
+If you use SRVCTL, SQL*Plus, or LSNRCTL to manage a database instance or its listener, then use the binaries located in the Oracle home where the database instance or listener is running, and set the ORACLE_HOME environment variable to the location of that Oracle home
+
+You use SRVCTL, a command-line interface, to manage databases, instances, listeners, services, and applications that run in an Oracle Clusterware environment. Using SRVCTL you can start and stop nodeapps, databases, instances, listeners, and services, delete or move instances and services, add services, and manage configuration information. Manages the resources defined in the Oracle Cluster Registry (OCR). These resources include the node applications, called nodeapps, that comprise Oracle Clusterware, which includes the Oracle Notification Service (ONS), and the Virtual IP (VIP).
+
+CRSCTL is a command-line tool that you can use to start and stop Oracle Clusterware and to determine the current status of your Oracle Clusterware installation. Manages Oracle Clusterware daemons. These daemons include Cluster Synchronization Services (CSS), Cluster-Ready Services (CRS), and Event Manager (EVM).
+
+ASMCA is a utility that supports installing and configuring Oracle ASM instances, disk groups, volumes, and Oracle Automatic Storage Management Cluster File System (Oracle ACFS). ASMCA provides both a GUI and a non-GUI interface.
+
+ASMCMD is a command-line utility that you can use to manage Oracle ASM instances, Oracle ASM disk groups, file access control for disk groups, files and directories within Oracle ASM disk groups, templates for disk groups, and Oracle ASM volumes.
+
+-------------------------------------------------------------------------------------------------
+About Shared Storage
+-------------------------------------------------------------------------------------------------
+An Oracle RAC database is a shared everything database. All data files, control files, redo log files, and the server parameter file (SPFILE) used by the Oracle RAC database must reside on shared storage that is accessible by all the Oracle RAC database instances. The Oracle RAC installation demonstrated in this guide uses Oracle ASM for the shared storage for Oracle Clusterware and Oracle Database files.
+
+Voting disk¡VManages cluster membership and arbitrates cluster ownership between the nodes in case of network failures. The voting disk is a file that resides on shared storage. For high availability, Oracle recommends that you have multiple voting disks, and that you have an odd number of voting disks. If you define a single voting disk, then use mirroring at the file system level for redundancy.
+
+The number of voting files you can store in a particular Oracle ASM disk group depends upon the redundancy of the disk group. By default, Oracle ASM puts each voting disk in its own failure group within the disk group. A normal redundancy disk group must contain at least two failure groups but if you are storing your voting disks on Oracle ASM, then a normal redundancy disk group must contain at least three failure groups. A high redundancy disk group must contain at least three failure groups.
+
+Oracle Cluster Registry (OCR)¡VMaintains cluster configuration information and configuration information about any cluster database within the cluster. The OCR contains information such as which database instances run on which nodes and which services run on which databases. The OCR also stores information about processes that Oracle Clusterware controls. The OCR resides on shared storage that is accessible by all the nodes in your cluster. Oracle Clusterware can multiplex, or maintain multiple copies of, the OCR and Oracle recommends that you use this feature to ensure high availability.
+
+These Oracle Clusterware components require the following disk space on a shared file system:
+Three Oracle Clusterware Registry (OCR) files, a least 400 MB for each, or 1.2 GB total disk space
+Three voting disk files, 300 MB each, or 900 MB total disk space
+
+
+By default, the Linux 2.6 kernel device file naming scheme udev dynamically creates device file names when the server is started, and assigns ownership of them to root. If udev applies default settings, then it changes device file names and owners for voting disks or Oracle Cluster Registry partitions, corrupting them when the server is restarted. For example, a voting disk on a device named /dev/sdd owned by the user grid may be on a device named /dev/sdf owned by root after restarting the server.
+
+If you use ASMLIB, then you do not have to ensure permissions and device path persistency in udev. If you do not use ASMLIB, then you must create a custom rules file for the shared disks mounted on each node. When udev is started, it sequentially carries out rules (configuration directives) defined in rules files. These files are in the path /etc/udev/rules.d/. Rules files are read in lexical order. For example, rules in the file 10-wacom.rules are parsed and carried out before rules in the rules file 90-ib.rules.
+
+If you installed the Oracle Cluster Registry (OCR) and Voting Disks on Oracle ASM as part of your Oracle Grid Infrastructure for a cluster install, then OUI creates the Oracle ASM instances and you do not have to run ASMCA. You must use ASMCA only if you did not specify Oracle ASM storage for the OCR and Voting disks during installation.
+
+-------------------------------------------------------------------------------------------------
+Caution
+-------------------------------------------------------------------------------------------------
+After installation is complete, do not remove manually or run cron jobs that remove /tmp/.oracle or /var/tmp/.oracle directories or their files while Oracle software is running on the server. If you remove these files, then the Oracle software can encounter intermittent hangs. Oracle Clusterware installations can fail with the error:
+CRS-0184: Cannot communicate with the CRS daemon.
+
+
+-------------------------------------------------------------------------------------------------
+Parameters
+-------------------------------------------------------------------------------------------------
+Parameters that Must Have Identical Settings on All Instances
+Certain initialization parameters that are critical at database creation or that affect certain database operations must have the same value for every instance in an Oracle RAC database. Specify these parameter values in the SPFILE, or within the individual PFILEs for each instance. The following list contains the parameters that must be identical on every instance:
+
+CLUSTER_DATABASE
+COMPATIBLE
+CONTROL_FILES
+DB_BLOCK_SIZE
+DB_DOMAIN
+DB_FILES
+DB_NAME
+DB_RECOVERY_FILE_DEST
+DB_RECOVERY_FILE_DEST_SIZE
+DB_UNIQUE_NAME
+DML_LOCKS (only if set to 0)
+INSTANCE_TYPE (RDBMS or ASM)
+PARALLEL_EXECUTION_MESSAGE_SIZE
+REMOTE_LOGIN_PASSWORDFILE
+RESULT_CACHE_MAX_SIZE (either enabled or disabled on all instances)
+UNDO_MANAGEMENT
+
+Parameters that Must Have Unique Settings on All Instances
+For the following parameters, the parameter must be set on all instances to a value that is unique to that instance:
+
+ASM_PREFERRED_READ_FAILURE_GROUPS
+CLUSTER_INTERCONNECTS
+INSTANCE_NUMBER
+ROLLBACK_SEGMENTS (if the UNDO_MANAGEMENT initialization parameter is not set to AUTO)
+UNDO_TABLESPACE (if UNDO_MANAGEMENT is set to AUTO)
+
+
+-------------------------------------------------------------------------------------------------
+About Automatic Undo Management in Oracle RAC
+-------------------------------------------------------------------------------------------------
+Oracle RAC automatically manages undo segments within a specific undo tablespace that is assigned to an instance. Only the instance assigned to the undo tablespace can modify the contents of that tablespace. However, each instance can read the undo data blocks created by any instance. Also, when performing transaction recovery, any instance can update any undo tablespace, if that undo tablespace is not currently being used by another instance for undo generation or transaction recovery. You assign undo tablespaces in your Oracle RAC database by specifying a different value for the UNDO_TABLESPACE parameter for each instance in your SPFILE or individual PFILEs. You cannot simultaneously use automatic undo management and manual undo management in an Oracle RAC database. In other words, all instances of an Oracle RAC database must operate in the same undo mode.
+
+
+-------------------------------------------------------------------------------------------------
+About Redo Log Groups and Redo Threads in Oracle RAC Databases
+-------------------------------------------------------------------------------------------------
+Redo logs contain a record of changes that have been made to data files. In a single-instance Oracle database, redo logs are stored in two or more redo log file groups. Each of these groups contains a redo log file and possibly one or more mirrored copies of that file. In an Oracle RAC database, each instance requires its own set of redo log groups, which is known as a redo thread.
+
+In an Oracle RAC database, all the redo log files reside on shared storage. In addition, each instance must have access to the redo log files of all the other instances in the cluster. If your Oracle RAC database uses Oracle ASM, then Oracle ASM manages the shared storage for the redo log files and the access to those files.
+
+In case of instance failure, a surviving instance can read the redo logs of the failed instance. Users can continue to access and update the database without waiting for the failed instance to be restarted. For example, assume that you have an Oracle RAC database with two instances, instance A and instance B. If instance A is down, then instance B can read the redo log files for both instance A and B to ensure a successful recovery.
+
+-------------------------------------------------------------------------------------------------
+OCR Backups, Monitoring and Restore
+-------------------------------------------------------------------------------------------------
+To find the most recent backup of the OCR:
+
+Run the following command on any node in the cluster:
+
+ocrconfig -showbackup
+
+To check the status of the OCR:
+
+Run the following command:
+
+ocrcheck 
+If this command does not display the message 'Device/File integrity check succeeded' for at least one copy of the OCR, then all copies of the OCR have failed. You must restore the OCR from a backup or OCR export.
+
+If there is at least one copy of the OCR available, then you can use that copy to restore the other copies of the OCR.
+
+
+To restore the OCR from an automatically generated backup on an Oracle Linux system:
+
+Log in as the root user.
+
+Identify the available OCR backups using the ocrconfig command:
+
+[root]# ocrconfig -showbackup
+Review the contents of the backup using the following ocrdump command, where file_name is the name of the OCR backup file for which the contents should be written out to the file ocr_dump_output_file:
+
+[root]# ocrdump ocr_dump_output_file -backupfile file_name
+If you do not specify an output file name, then the utility writes the OCR contents to a file named OCRDUMPFILE in the current directory.
+
+As the root user, stop Oracle Clusterware on all the nodes in your cluster by executing the following command:
+
+[root]# crsctl stop cluster -all
+As the root user, restore the OCR by applying an OCR backup file that you identified in Step 2 using the following command, where file_name is the name of the OCR to restore. Ensure that the OCR devices that you specify in the OCR configuration exist, and that these OCR devices are valid before running this command.
+
+[root]# ocrconfig -restore file_name
+As the root user, restart Oracle Clusterware on all the nodes in your cluster by running the following command:
+
+[root]# crsctl start cluster -all
+Use the Cluster Verification Utility (CVU) to verify the OCR integrity. Exit the root user account, and, as the software owner of the Oracle Grid Infrastructure for a cluster installation, run the following command, where the -n all argument retrieves a list of all the cluster nodes that are configured as part of your cluster:
+
+cluvfy comp ocr -n all [-verbose]
+
+
+-------------------------------------------------------------------------------------------------
+About Oracle Services
+-------------------------------------------------------------------------------------------------
+When a user or application connects to a database, Oracle recommends that you use a service for the connection. Oracle Database automatically creates one database service when the database is created. For basic or administrative connections, this may be all you need. However, for more flexibility in the management of the applications connecting to the database and their workload, you should create one or more application services and specify which database instances offer the services.
+
+-------------------------------------------------------------------------------------------------
+About Fast Application Notification (FAN)
+-------------------------------------------------------------------------------------------------
+
+Oracle Clusterware and Oracle RAC use Oracle Notification Service (ONS) to propagate FAN messages both within the Oracle cluster and to client or mid-tier machines. ONS is installed with Oracle Clusterware and the resources to manage the ONS daemons are created automatically during the installation process. ONS daemons run on each node of the cluster and send and receive messages from a configured list of nodes where other ONS daemons are active; this list of nodes can include nodes outside the cluster, such as application server tiers or client nodes.
+
+The executable files for FAN callouts are stored in the Grid_home/racg/usrco subdirectory. If this subdirectory does not exist in your Grid home, then you must create this directory with the same permissions and ownership as the Grid_home/racg/tmp subdirectory.
+
+All executables in the Grid_home/racg/usrco subdirectory are executed immediately, in an asynchronous fashion, when a FAN event is received through the Oracle Notification Service (ONS). For most event types, the callout is executed on one node in the cluster (the node generating the event), thus a copy of the executable files used by FAN callouts should be available on every node that runs Oracle Clusterware. An example of a callout script can be found in the section "Oracle RAC FAN Callout Start Services Script" in the following white paper, available on Oracle Technology Network: http://www.oracle.com/us/products/database/maa-wp-beehive-maa-130890.pdf
+
+
+-------------------------------------------------------------------------------------------------
+About the Global Cache Block Access Latency Chart
+-------------------------------------------------------------------------------------------------
+Concurrent read and write activity on shared data in a cluster is a frequently occurring activity. Depending on the service requirements, this activity does not usually cause performance problems. However, when global cache requests cause a performance problem, optimizing SQL plans and the schema to improve the rate at which data blocks are located in the local buffer cache, and minimizing I/O is a successful strategy for performance tuning. If the latency for consistent-read and current block requests reaches 10 milliseconds, then your first step in resolving the problem should be to go to the Cluster Cache Coherency page for more detailed information.
+
+
+-------------------------------------------------------------------------------------------------
+About the Oracle Clusterware Alert Log
+-------------------------------------------------------------------------------------------------
+The location of the Oracle Clusterware log file is ORACLE_BASE/diag/crs/hostname/crs/trace/alert.log
+
+
+-------------------------------------------------------------------------------------------------
+Using Oracle Enterprise Manager Cloud Control for Patching Operations
+-------------------------------------------------------------------------------------------------
+Using Cloud Control with its Provisioning & Patching functionality, you can automate the patching of your Oracle Grid Infrastructure and Oracle RAC software. Before you can use Cloud Control to patch your Oracle software, you must perform the following system configuration tasks:
+
+Install the Enterprise Manager Agent on all cluster nodes
+
+Use PDP setup to ensure the host user has the necessary privileges to complete patching tasks
+
+Configure named and preferred credentials in Enterprise Manager
+
+Configure a software library for storing patch files
+
+Details on how to perform these tasks, and how to patch your Oracle Grid Infrastructure and Oracle RAC software using Cloud Control are available from the following PDF file: http://www.oracle.com/technetwork/oem/pdf/512066.pdf
+
+The rest of this chapter describes how to install patches without using Cloud Control.
+
